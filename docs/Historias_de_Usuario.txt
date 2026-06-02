@@ -1,0 +1,1065 @@
+Historias de Usuario — Sistema de Notificación Automatizada de Parches de Vulnerabilidades
+
+> **Proyecto**: VulnPatchNotifier — Tesis UTN FRM
+> **Fecha**: 2026
+> **Ordenamiento**: Por orden lógico de implementación (dependencias resueltas primero)
+
+
+Actores del Sistema
+
+| Actor                      | Descripción                                                                                   |
+| -------------------------- | --------------------------------------------------------------------------------------------- |
+| **Sistema**                | Pipeline automatizado n8n: ejecuta workflow, recolecta, correlaciona, prioriza, notifica      |
+| **Analista de Seguridad**  | Recibe alertas, triagea, reconoce, marca falsos positivos, coordina remediación               |
+| **Gestor de IT**           | Aplica parches, documenta remediación, registra patch_version y verification_method           |
+| **Responsable Org.**       | Consume métricas de postura de seguridad: MTTD, MTTR, SLA compliance, tendencias             |
+| **Administrador**          | Mantiene inventario CPE, configura workflows, gestiona entorno Docker, ajusta parámetros      |
+
+---
+
+Reglas de Negocio (Referencia Completa)
+
+**Dominio: Recolección de CVEs**
+
+| ID      | Regla                                                                                                                  | Historias Asociadas      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| RN-RC01 | El workflow de recolección se ejecuta exactamente una vez por día a las 02:00 UTC mediante cron trigger               | US-001                   |
+| RN-RC02 | Solo se consultan CVEs publicados en las últimas 24 horas (pubStartDate=yesterday, pubEndDate=today)                  | US-002                   |
+| RN-RC03 | El procesamiento es idempotente: re-ejecuciones en el mismo día no duplican registros (ON CONFLICT DO UPDATE)          | US-004                   |
+| RN-RC04 | Si NVD API retorna más de 2000 resultados, se paginan las requests hasta obtener todos los CVEs del día               | US-005                   |
+| RN-RC05 | CVEs sin CVSS v3 usan CVSS v2 como fallback; CVEs sin score se almacenan con campos nulos (CVSS_base=0 en priorización)| US-003                   |
+| RN-RC06 | Toda ejecución de workflow registra entry en audit_log con status (SUCCESS/FAILED/PARTIAL) y records_processed         | US-006                   |
+| RN-RC07 | Si NVD API retorna error HTTP o timeout, el workflow registra status=FAILED en audit_log y re-intenta una vez           | US-006, US-041           |
+
+**Dominio: Inventario de Software**
+
+| ID      | Regla                                                                                                                  | Historias Asociadas      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| RN-IN01 | Todo activo debe tener CPE URI válido con formato cpe:2.3:[tipo]:[vendor]:[producto]:[versión]:...                    | US-007, US-008           |
+| RN-IN02 | La criticality del activo es CRITICAL, HIGH, MEDIUM o LOW — no se permiten otros valores (CHECK constraint)           | US-007, US-009           |
+| RN-IN03 | Cada CPE URI debe ser único en la tabla (UNIQUE constraint); no se permiten duplicados                                | US-007                   |
+| RN-IN04 | exposed_to_internet es conocimiento previo del admin; shodan_exposed es confirmación real de Shodan API               | US-010, US-020           |
+| RN-IN05 | No se permite eliminar físicamente activos del inventario si tienen correlaciones activas (FK ON DELETE CASCADE previene)| US-011                   |
+| RN-IN06 | La versión en CPE URI debe reflejar la versión instalada real; versiones desconocidas se documentan con '-'            | US-007, US-008           |
+
+**Dominio: Correlación CVE — Inventario**
+
+| ID      | Regla                                                                                                                  | Historias Asociadas      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| RN-CO01 | La correlación se ejecuta solo sobre CVEs con status='unprocessed'                                                    | US-012                   |
+| RN-CO02 | Un par (cve_id, software_id) es único en applicable_vulnerabilities — re-correlaciones no duplican                    | US-012, US-013, US-014   |
+| RN-CO03 | correlation_confidence=HIGH para exact/wildcard/semver; MEDIUM para fallback numérico; LOW para versiones opacas       | US-012, US-013, US-014, US-015 |
+| RN-CO04 | CVEs sin campo configurations en NVD no pueden correlacionarse automáticamente; status queda 'unprocessed'            | US-012                   |
+| RN-CO05 | Al finalizar correlación de un CVE (con o sin matches), su status se actualiza a 'correlated'                         | US-016                   |
+| RN-CO06 | Exact match: strings CPE idénticos → confidence=HIGH                                                                  | US-012                   |
+| RN-CO07 | Wildcard match: CPE del CVE con * en versión + coincidencia de vendor y producto → confidence=HIGH                    | US-013                   |
+| RN-CO08 | Version range match: operadores semver (>=, <, etc.) sobre versión del inventario → confidence=HIGH                   | US-014                   |
+| RN-CO09 | Fallback heurístico: versión con sufijo distribución → extrae base numérica → confidence=MEDIUM                       | US-015                   |
+| RN-CO10 | Fallback heurístico: versión de 4 componentes → trunca a 3 → confidence=MEDIUM                                       | US-015                   |
+| RN-CO11 | Fallback heurístico: versión opaca (fecha, build) → confidence=LOW, nota de verificación manual en alerta             | US-015                   |
+
+**Dominio: Priorización y Risk Score**
+
+| ID      | Regla                                                                                                                  | Historias Asociadas      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| RN-PR01 | Risk_Score = (0.35×CVSS_base) + (0.25×CVSS_temporal) + (0.20×Exposure_factor) + (0.15×Criticality_factor) + KEV_bonus | US-018, US-019, US-022   |
+| RN-PR02 | Risk_Score se cappea en 10.0 aunque la fórmula produzca valores superiores                                            | US-022                   |
+| RN-PR03 | CVSS_temporal = CVSS_base × Exploit_maturity_multiplier (Unproven/POC=0.90, Functional=0.95, High=1.00)               | US-019                   |
+| RN-PR04 | Exposure_factor: visible en Shodan=10, no visible=3; si Shodan API falla se usa 3 como valor conservador              | US-020                   |
+| RN-PR05 | Criticality_factor según criticality del activo: CRITICAL=10, HIGH=7.5, MEDIUM=5, LOW=2.5                             | US-021                   |
+| RN-PR06 | KEV_bonus=+2.0 si el CVE está en CISA KEV catalog; KEV_bonus=0 si no                                                  | US-021                   |
+| RN-PR07 | Criticality_tier: CRITICAL (>=8.5), HIGH (7.0–8.4), MEDIUM (5.0–6.9), LOW (<5.0)                                     | US-023                   |
+| RN-PR08 | SLA deadline se calcula automáticamente via trigger PostgreSQL: CRITICAL=24h, HIGH=72h, MEDIUM=7d, LOW=30d             | US-024                   |
+| RN-PR09 | El catálogo CISA KEV se descarga UNA VEZ por día y se cachea; no se consulta individualmente por CVE                  | US-021                   |
+| RN-PR10 | Los pesos del motor son configurables via variables de entorno; los valores default son los de la fórmula de la tesis  | US-022                   |
+
+**Dominio: Alertas y Notificaciones**
+
+| ID      | Regla                                                                                                                  | Historias Asociadas      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| RN-AL01 | Alertas se generan solo para correlaciones con criticality_tier IS NOT NULL y sin alerta previa                       | US-025, US-029           |
+| RN-AL02 | Las alertas se procesan en orden descendente de risk_score (las más críticas primero)                                  | US-029                   |
+| RN-AL03 | Se generan SIEMPRE dos alertas por correlación: una EMAIL y una SLACK (ambos canales son obligatorios)                | US-026, US-027           |
+| RN-AL04 | Template email: color-coding por tier (CRITICAL=rojo #ff0000, HIGH=naranja #ff8800, MEDIUM=amarillo #ffdd00, LOW=azul #0088ff) | US-025              |
+| RN-AL05 | Template Slack: emoji por tier (🔴 CRITICAL, 🟠 HIGH, 🟡 MEDIUM, 🔵 LOW) con Slack Block Kit                          | US-027                   |
+| RN-AL06 | Toda alerta debe incluir: CVE ID (con link NVD), descripción, CVSS score, risk_score, activos afectados, SLA deadline | US-025, US-027           |
+| RN-AL07 | Alertas de confidence=LOW incluyen nota explícita: "Verificación manual recomendada — versión no estándar"            | US-028                   |
+| RN-AL08 | Cada alerta enviada genera registro en vulnerability_alerts con status='notified' y sent_at=NOW()                     | US-029                   |
+
+**Dominio: Remediación y SLA Tracking**
+
+| ID      | Regla                                                                                                                  | Historias Asociadas      |
+| ------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| RN-RE01 | State machine: notified→acknowledged→in_progress→remediated (terminal) / notified|acknowledged→false_positive (terminal) | US-031, US-032, US-033, US-034 |
+| RN-RE02 | No se permiten retrocesos de estado ni transiciones saltadas                                                          | US-031                   |
+| RN-RE03 | Al marcar remediated: patch_version y verification_method son obligatorios                                            | US-033                   |
+| RN-RE04 | MTTR = AVG(remediation_completed_at - sent_at), calculado desde el envío de la alerta, no desde acknowledged_at       | US-037                   |
+| RN-RE05 | El workflow de monitoreo SLA verifica cada hora si alertas activas superaron sla_deadline; re-notifica en escalación  | US-035                   |
+| RN-RE06 | Re-notificaciones de SLA vencido van al canal SLACK_WEBHOOK_ESCALATION, no al canal principal                        | US-035                   |
+
+---
+
+EPIC 00 — Infraestructura y Setup
+
+US-000: Entorno Docker Compose
+
+- **Título**: Configuración del entorno base con Docker Compose
+- **Historia**: Como **Administrador**, quiero levantar todo el entorno del sistema con un único comando, para reproducir el ambiente de desarrollo/producción de forma portable.
+- **Prioridad**: Alta
+- **Dependencias**: Ninguna
+
+**Criterios de Aceptación**:
+- [ ] GIVEN el archivo docker-compose.yml y .env configurado, WHEN ejecuto `docker-compose up -d`, THEN los tres contenedores (n8n, postgres, redis) están corriendo sin errores.
+- [ ] n8n es accesible en http://localhost:5678 con autenticación básica.
+- [ ] PostgreSQL está accesible desde n8n en el host `postgres` puerto 5432 dentro de la red Docker.
+- [ ] Redis está accesible desde n8n en el host `redis` puerto 6379 dentro de la red Docker.
+- [ ] El contenedor PostgreSQL persiste datos en un volumen Docker nombrado para sobrevivir reinicios.
+- [ ] `docker-compose down` detiene todos los contenedores sin errores.
+
+**Notas Técnicas**:
+- Servicios: n8n:latest (o tag específico 1.x), postgres:16, redis:7
+- Networks: red privada `vuln-network` — PostgreSQL y Redis NO expuestos al host
+- Volumes: postgres_data, n8n_data
+- Health checks: postgres con `pg_isready`, n8n con HTTP GET /healthz
+
+---
+
+US-000a: Schema SQL de Base de Datos
+
+- **Título**: Creación del schema de base de datos
+- **Historia**: Como **Administrador**, quiero que el schema PostgreSQL se cree con un único script SQL, para reproducir la base de datos en cualquier ambiente limpio.
+- **Prioridad**: Alta
+- **Dependencias**: US-000
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una instancia PostgreSQL vacía, WHEN ejecuto `psql -f db/schema.sql`, THEN se crean las 5 tablas sin errores.
+- [ ] Se crean los 5 triggers automáticos: 4 de updated_at + 1 de SLA deadline.
+- [ ] Se crean los índices definidos en la especificación.
+- [ ] Se crean las 2 vistas (v_applicable_vulnerabilities_full, v_sla_compliance_metrics).
+- [ ] El schema es idempotente: ejecutarlo dos veces no produce errores (usar IF NOT EXISTS / CREATE OR REPLACE).
+- [ ] El trigger set_sla_deadline calcula correctamente: INSERT con criticality_tier='CRITICAL' → sla_deadline = NOW() + 24h.
+
+**Notas Técnicas**:
+- Schema: vulnerability_management
+- `SET search_path TO vulnerability_management;` al inicio del script
+- Usar `CREATE SCHEMA IF NOT EXISTS vulnerability_management;`
+
+---
+
+US-000b: Seed de Inventario de Software
+
+- **Título**: Carga de datos de ejemplo del inventario
+- **Historia**: Como **Administrador**, quiero cargar un inventario de software de ejemplo con nomenclatura CPE, para tener datos iniciales con los que probar el sistema.
+- **Prioridad**: Alta
+- **Dependencias**: US-000a
+
+**Criterios de Aceptación**:
+- [ ] GIVEN el schema creado, WHEN ejecuto `psql -f db/seed.sql`, THEN se insertan al menos 10 activos en software_inventory sin errores.
+- [ ] El seed incluye al menos un activo de cada criticality: CRITICAL, HIGH, MEDIUM, LOW.
+- [ ] El seed incluye al menos 2 activos con exposed_to_internet=TRUE.
+- [ ] Los CPE URIs del seed siguen el formato estándar cpe:2.3:a:vendor:product:version:...
+- [ ] El seed es idempotente: ejecutarlo dos veces no duplica datos (ON CONFLICT DO NOTHING).
+- [ ] Los activos del seed incluyen al menos: Apache HTTP Server, Log4j, PostgreSQL, OpenSSL, un SO Windows Server.
+
+**Notas Técnicas**:
+- Ejemplos de CPE en especificación: apache/http_server, apache/log4j, postgresql/postgresql, microsoft/windows_server_2019
+- El seed usa versiones vulnerables conocidas para permitir testing de correlación real contra NVD
+
+---
+
+US-000c: Configuración de Variables de Entorno
+
+- **Título**: Plantilla de variables de entorno documentada
+- **Historia**: Como **Administrador**, quiero un archivo .env.example completo, para saber exactamente qué configurar antes de levantar el sistema.
+- **Prioridad**: Alta
+- **Dependencias**: US-000
+
+**Criterios de Aceptación**:
+- [ ] Existe archivo .env.example en la raíz del repositorio con todas las variables documentadas.
+- [ ] Cada variable tiene un comentario explicativo de su propósito y un valor de ejemplo (no real).
+- [ ] El archivo .env real está en .gitignore y NUNCA se commitea al repositorio.
+- [ ] Las variables incluyen: NVD_API_KEY, SHODAN_API_KEY, POSTGRES_*, N8N_*, SMTP_*, SLACK_WEBHOOK_URL, SLACK_WEBHOOK_ESCALATION, CISA_KEV_CACHE_TTL_HOURS.
+
+**Notas Técnicas**:
+- Obtención de NVD API key: https://nvd.nist.gov/developers/request-an-api-key
+- Obtención de Shodan API key: https://account.shodan.io/
+- SMTP: puede ser Gmail con App Password o cualquier servidor SMTP
+
+---
+
+US-000d: Importación de Workflows n8n
+
+- **Título**: Workflows n8n importables desde archivos JSON
+- **Historia**: Como **Administrador**, quiero importar todos los workflows desde archivos JSON en el repositorio, para no configurar nodos manualmente desde cero.
+- **Prioridad**: Alta
+- **Dependencias**: US-000, US-000a
+
+**Criterios de Aceptación**:
+- [ ] Existen archivos JSON exportados de n8n en la carpeta workflows/ para cada workflow del pipeline.
+- [ ] Los workflows son importables desde n8n UI (Settings → Import) sin errores de schema.
+- [ ] Tras la importación, los nodos PostgreSQL tienen la conexión de BD configurada como variable (no hardcodeada).
+- [ ] Tras la importación, los nodos HTTP Request tienen API keys configuradas mediante n8n Credentials (no en texto plano en el nodo).
+- [ ] El README documenta el orden de importación de workflows.
+
+**Notas Técnicas**:
+- Workflows a exportar: workflow-collection.json, workflow-correlation.json, workflow-prioritization.json, workflow-alerts.json, workflow-monitoring.json, workflow-remediation.json
+- Las credenciales (API keys, SMTP, Slack) se configuran en n8n Settings > Credentials y se referencian por nombre en los nodos
+
+---
+
+EPIC 01 — Recolección de CVEs (Etapa 1)
+
+US-001: Schedule Trigger Diario
+
+- **Título**: Trigger cron de ejecución diaria
+- **Historia**: Como **Sistema**, quiero ejecutar el pipeline de recolección automáticamente cada día a las 02:00 UTC, para asegurar que ninguna vulnerabilidad publicada ese día quede sin procesar.
+- **Prioridad**: Alta
+- **Dependencias**: US-000d
+
+**Criterios de Aceptación**:
+- [ ] GIVEN el workflow activo en n8n, WHEN llegan las 02:00 UTC, THEN el workflow se ejecuta automáticamente sin intervención humana.
+- [ ] El Schedule Trigger está configurado con expresión cron `0 2 * * *`.
+- [ ] El workflow puede ejecutarse también manualmente desde n8n UI para testing (botón "Execute Workflow").
+- [ ] Si el workflow falla, n8n no reintenta automáticamente (el sistema maneja reintentos explícitamente en US-041).
+
+**Notas Técnicas**:
+- Nodo: Schedule Trigger (tipo Cron)
+- Expresión cron: `0 2 * * *`
+- RN-RC01
+
+---
+
+US-002: Consulta a NVD API
+
+- **Título**: Recolección de CVEs desde NVD API 2.0
+- **Historia**: Como **Sistema**, quiero consultar la NVD API 2.0 con el rango de fechas de las últimas 24 horas, para obtener todos los CVEs publicados hoy.
+- **Prioridad**: Alta
+- **Dependencias**: US-001, US-000c
+
+**Criterios de Aceptación**:
+- [ ] GIVEN el workflow ejecutándose, WHEN consulta NVD API, THEN la request incluye pubStartDate y pubEndDate calculados dinámicamente.
+- [ ] La API key se incluye en el header `x-api-key` (no en query params).
+- [ ] El parámetro `resultsPerPage=2000` está configurado.
+- [ ] Si la API retorna HTTP 200 con array vulnerabilities no vacío, el workflow continúa al siguiente nodo.
+- [ ] Si la API retorna HTTP 403 (API key inválida), el workflow registra FAILED en audit_log con mensaje descriptivo.
+- [ ] Si la API retorna HTTP 503 o timeout, el workflow registra FAILED en audit_log y re-intenta una vez tras 5 minutos (RN-RC07).
+
+**Notas Técnicas**:
+- Endpoint: `GET https://services.nvd.nist.gov/rest/json/cves/2.0`
+- Params: `pubStartDate={{ $now.minus({days:1}).toFormat('yyyy-MM-dd') }}T00:00:00.000&pubEndDate={{ $now.toFormat('yyyy-MM-dd') }}T23:59:59.999&resultsPerPage=2000`
+- RN-RC02
+
+---
+
+US-003: Parseo y Normalización de Respuesta NVD
+
+- **Título**: Parsing del JSON de NVD y normalización de campos
+- **Historia**: Como **Sistema**, quiero extraer y normalizar los campos relevantes de cada CVE retornado por NVD, para preparar un objeto limpio e insertable en PostgreSQL.
+- **Prioridad**: Alta
+- **Dependencias**: US-002
+
+**Criterios de Aceptación**:
+- [ ] GIVEN la respuesta JSON de NVD, WHEN ejecuta el Function node de parseo, THEN produce un objeto por CVE con los campos: cve_id, description (en inglés), cvss_v3_base_score, cvss_v3_vector, cvss_v3_severity, cvss_v2_base_score, cwe_id, published_date, last_modified_date, configurations (JSON string), references (JSON string).
+- [ ] Si el CVE no tiene métricas CVSS v3 pero tiene v2, se usan los campos de v2 como fallback (RN-RC05).
+- [ ] Si el CVE no tiene ningún score CVSS, los campos numéricos quedan en null (no falla el nodo).
+- [ ] La descripción se extrae priorizando el idioma 'en'; si no existe, se usa el primer idioma disponible.
+- [ ] configurations y references se serializan como JSON string para almacenamiento en columnas JSONB.
+
+**Notas Técnicas**:
+- Función JavaScript en n8n Function Node
+- Path CVSS v3: `cve.metrics?.cvssMetricV31?.[0]?.cvssData`
+- Path CVSS v2: `cve.metrics?.cvssMetricV2?.[0]?.cvssData`
+- Path description: `cve.descriptions?.find(d => d.lang === 'en')?.value`
+- RN-RC05
+
+---
+
+US-004: Upsert de CVEs en PostgreSQL
+
+- **Título**: Inserción idempotente de CVEs en base de datos
+- **Historia**: Como **Sistema**, quiero insertar los CVEs parseados en la tabla cves de forma idempotente, para que re-ejecuciones del workflow no generen duplicados.
+- **Prioridad**: Alta
+- **Dependencias**: US-003, US-000a
+
+**Criterios de Aceptación**:
+- [ ] GIVEN los CVEs normalizados, WHEN ejecuta el nodo PostgreSQL, THEN inserta cada CVE con status='unprocessed'.
+- [ ] Si el cve_id ya existe (conflicto en UNIQUE constraint), actualiza description, last_modified_date, references y updated_at (ON CONFLICT DO UPDATE).
+- [ ] Si el CVE ya tiene status='correlated' o 'prioritized', el upsert NO resetea su status.
+- [ ] La cantidad de CVEs insertados/actualizados se reporta en el audit_log (records_processed).
+- [ ] El nodo falla explícitamente (y registra FAILED en audit_log) si PostgreSQL no está disponible.
+
+**Notas Técnicas**:
+- SQL: `INSERT INTO cves (...) ON CONFLICT (cve_id) DO UPDATE SET description=EXCLUDED.description, last_modified_date=EXCLUDED.last_modified_date, references=EXCLUDED.references, updated_at=NOW() WHERE cves.status='unprocessed'`
+- RN-RC03
+
+---
+
+US-005: Paginación de NVD API
+
+- **Título**: Manejo de paginación cuando NVD retorna más de 2000 CVEs
+- **Historia**: Como **Sistema**, quiero paginar las requests a NVD API cuando el total de CVEs del día supera 2000, para no perder vulnerabilidades publicadas ese día.
+- **Prioridad**: Media
+- **Dependencias**: US-002, US-003
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una respuesta NVD donde totalResults > 2000, WHEN el workflow detecta la condición, THEN ejecuta requests adicionales con startIndex incrementado en 2000 por iteración.
+- [ ] El loop continúa hasta que startIndex >= totalResults.
+- [ ] Todos los CVEs de todas las páginas se acumulan y se procesan por el nodo de parseo.
+- [ ] El audit_log registra el total de CVEs procesados (suma de todas las páginas).
+
+**Notas Técnicas**:
+- Nodo IF: `$json.totalResults > ($json.startIndex + $json.resultsPerPage)`
+- Incrementar startIndex y hacer nueva request HTTP con startIndex actualizado
+- RN-RC04
+
+---
+
+US-006: Registro en Audit Log
+
+- **Título**: Auditoría de cada ejecución de workflow
+- **Historia**: Como **Administrador**, quiero que cada ejecución de workflow quede registrada en audit_log, para poder diagnosticar problemas y auditar el comportamiento del sistema.
+- **Prioridad**: Alta
+- **Dependencias**: US-004
+
+**Criterios de Aceptación**:
+- [ ] GIVEN cualquier ejecución del workflow de recolección (exitosa o fallida), THEN se inserta un registro en audit_log.
+- [ ] El registro incluye: workflow_name='workflow-collection', execution_id (de n8n), status (SUCCESS/FAILED/PARTIAL), records_processed, error_message (si aplica), execution_time_ms, executed_at.
+- [ ] status=SUCCESS: todos los CVEs del día fueron procesados sin errores.
+- [ ] status=PARTIAL: algunos CVEs fallaron pero al menos uno fue procesado exitosamente.
+- [ ] status=FAILED: el workflow falló antes de procesar cualquier CVE (API no disponible, BD no disponible).
+- [ ] El registro de audit_log se inserta incluso cuando el workflow falla (mediante nodo de error handling).
+
+**Notas Técnicas**:
+- SQL: `INSERT INTO audit_log (workflow_name, execution_id, status, records_processed, error_message, execution_time_ms)`
+- RN-RC06, RN-RC07
+
+---
+
+EPIC 02 — Gestión de Inventario de Software
+
+US-007: Alta de Activo en Inventario
+
+- **Título**: Registro de nuevo software en inventario con CPE
+- **Historia**: Como **Administrador**, quiero registrar nuevos activos de software en el inventario con su CPE URI, para que el sistema pueda correlacionarlos con CVEs relevantes.
+- **Prioridad**: Alta
+- **Dependencias**: US-000a
+
+**Criterios de Aceptación**:
+- [ ] GIVEN datos de un activo (CPE URI, vendor, product, version, asset_name, ip_address, criticality, exposed_to_internet, owner_team), WHEN se inserta en software_inventory, THEN el registro se crea correctamente.
+- [ ] El CPE URI sigue el formato cpe:2.3:[tipo]:[vendor]:[producto]:[versión]:... (RN-IN01).
+- [ ] Si el CPE URI ya existe, la inserción falla con error claro de UNIQUE constraint (RN-IN03).
+- [ ] La criticality solo acepta valores: CRITICAL, HIGH, MEDIUM, LOW (CHECK constraint o validación previa).
+- [ ] updated_at se actualiza automáticamente via trigger ante cualquier UPDATE.
+
+**Notas Técnicas**:
+- Puede realizarse vía psql, script seed, o en el futuro mediante webhook de n8n para inventory management
+- RN-IN01, RN-IN02, RN-IN03
+
+---
+
+US-008: Validación de CPE URI
+
+- **Título**: Validación de formato CPE URI en inventario
+- **Historia**: Como **Administrador**, quiero que el sistema valide el formato de los CPE URIs antes de aceptarlos, para evitar datos incorrectos que impidan la correlación.
+- **Prioridad**: Alta
+- **Dependencias**: US-007
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un CPE URI con formato cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*, WHEN se inserta, THEN se acepta correctamente.
+- [ ] GIVEN un CPE URI con formato inválido (ej. apache:http_server:2.4.49), WHEN se intenta insertar, THEN se rechaza con mensaje de error.
+- [ ] El CPE URI debe comenzar con `cpe:2.3:`.
+- [ ] El CPE URI debe tener exactamente 13 componentes separados por `:`.
+
+**Notas Técnicas**:
+- Implementar como CHECK constraint en PostgreSQL: `CONSTRAINT valid_cpe_format CHECK (cpe_uri LIKE 'cpe:2.3:%')`
+- Validación de 13 componentes: `array_length(string_to_array(cpe_uri, ':'), 1) = 13`
+- RN-IN01, RN-IN06
+
+---
+
+US-009: Clasificación de Criticidad de Activos
+
+- **Título**: Asignación de criticidad a activos del inventario
+- **Historia**: Como **Administrador**, quiero clasificar cada activo por criticidad (CRITICAL/HIGH/MEDIUM/LOW), para que el motor de priorización pueda calcular el impact factor correcto.
+- **Prioridad**: Alta
+- **Dependencias**: US-007
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un activo con criticality='CRITICAL', WHEN el motor de priorización lo procesa, THEN Criticality_factor=10.
+- [ ] GIVEN un activo con criticality='HIGH', WHEN el motor lo procesa, THEN Criticality_factor=7.5.
+- [ ] GIVEN un activo con criticality='MEDIUM', WHEN el motor lo procesa, THEN Criticality_factor=5.
+- [ ] GIVEN un activo con criticality='LOW', WHEN el motor lo procesa, THEN Criticality_factor=2.5.
+- [ ] Intentar insertar un activo con criticality='ULTRA' u otro valor inválido debe ser rechazado.
+
+**Notas Técnicas**:
+- CHECK constraint: `CONSTRAINT valid_criticality CHECK (criticality IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW'))`
+- RN-IN02, RN-PR05
+
+---
+
+US-010: Flag de Exposición a Internet
+
+- **Título**: Marcado de activos expuestos a Internet
+- **Historia**: Como **Administrador**, quiero marcar qué activos del inventario están expuestos a Internet, para enriquecer el factor de exposición en la priorización.
+- **Prioridad**: Media
+- **Dependencias**: US-007
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un activo con exposed_to_internet=TRUE, WHEN el workflow de priorización consulta Shodan para su IP, THEN si Shodan confirma la exposición, shodan_exposed=TRUE en applicable_vulnerabilities.
+- [ ] Si el campo ip_address del activo es NULL, el sistema no consulta Shodan y usa exposed_to_internet del inventario como proxy.
+- [ ] El campo shodan_exposed en applicable_vulnerabilities refleja la confirmación real de Shodan, independientemente del valor de exposed_to_internet en el inventario.
+- [ ] Si Shodan API falla, shodan_exposed=FALSE y Exposure_factor=3 (conservador) (RN-PR04).
+
+**Notas Técnicas**:
+- RN-IN04, RN-PR04
+
+---
+
+US-011: Actualización de Activos en Inventario
+
+- **Título**: Actualización de versión o datos de activos existentes
+- **Historia**: Como **Administrador**, quiero actualizar la versión de un activo en el inventario cuando se aplica una actualización de software, para que futuras correlaciones usen la versión correcta.
+- **Prioridad**: Media
+- **Dependencias**: US-007
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un activo existente, WHEN se actualiza su versión (y por ende el CPE URI), THEN el registro refleja el nuevo CPE URI.
+- [ ] Si el nuevo CPE URI viola la UNIQUE constraint (ya existe otro activo con ese CPE), la actualización se rechaza.
+- [ ] La actualización del CPE URI no afecta correlaciones ya existentes en applicable_vulnerabilities (las correlaciones históricas preservan el software_id original).
+- [ ] updated_at se actualiza automáticamente via trigger.
+
+**Notas Técnicas**:
+- RN-IN05
+
+---
+
+EPIC 03 — Correlación CVE — Inventario (Etapa 3)
+
+US-012: Exact Match de CPE
+
+- **Título**: Correlación por coincidencia exacta de CPE URI
+- **Historia**: Como **Sistema**, quiero detectar cuando el CPE URI de un CVE coincide exactamente con un activo del inventario, para registrar la correlación con máxima confianza.
+- **Prioridad**: Alta
+- **Dependencias**: US-004, US-007
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un CVE con configuración CPE `cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*` y un activo en inventario con el mismo CPE URI, WHEN ejecuta el workflow de correlación, THEN se inserta en applicable_vulnerabilities con correlation_confidence='HIGH'.
+- [ ] El par (cve_id, software_id) se inserta una sola vez (ON CONFLICT DO NOTHING).
+- [ ] Si no hay activos con exact match, el workflow continúa con wildcard match.
+- [ ] CVEs con configurations=NULL o vacío se saltan (no generan correlaciones) y su status pasa a 'correlated' igual (RN-CO04).
+
+**Notas Técnicas**:
+- JavaScript en Function Node: comparar strings CPE directamente con `===`
+- RN-CO01, RN-CO02, RN-CO03, RN-CO04, RN-CO06
+
+---
+
+US-013: Wildcard Match de CPE
+
+- **Título**: Correlación por coincidencia con wildcard en versión
+- **Historia**: Como **Sistema**, quiero detectar cuando el CPE de un CVE usa wildcard en versión (afecta todas las versiones de un producto), para correlacionar con todos los activos del inventario que usen ese producto.
+- **Prioridad**: Alta
+- **Dependencias**: US-012
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un CVE con CPE `cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*` (versión=*), WHEN ejecuta correlación, THEN hace match con TODOS los activos del inventario que tienen vendor=apache y product=log4j, independientemente de la versión.
+- [ ] Correlation_confidence='HIGH' para wildcard match (RN-CO07).
+- [ ] Si el exact match ya encontró el activo, el wildcard match no genera duplicado (ON CONFLICT DO NOTHING).
+- [ ] El wildcard match solo aplica cuando el componente de versión del CPE del CVE es `*` o `-`.
+
+**Notas Técnicas**:
+- Algoritmo: extraer vendor y product del CPE del CVE, comparar contra campos vendor y product de software_inventory
+- RN-CO02, RN-CO07
+
+---
+
+US-014: Version Range Match de CPE (semver)
+
+- **Título**: Correlación por rango de versiones usando semantic versioning
+- **Historia**: Como **Sistema**, quiero detectar cuando la versión de un activo del inventario cae dentro del rango de versiones afectadas especificado en un CVE, para correlacionar con precisión sin requerir coincidencia exacta de versión.
+- **Prioridad**: Alta
+- **Dependencias**: US-013
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un CVE que afecta versiones `>=2.4.0 <2.4.50` de Apache HTTP Server, y un activo con versión 2.4.45, WHEN ejecuta correlación, THEN se detecta el match y se inserta la correlación.
+- [ ] GIVEN el mismo CVE y un activo con versión 2.4.51, WHEN ejecuta correlación, THEN NO se genera correlación.
+- [ ] La comparación usa la biblioteca `semver` de Node.js para manejar edge cases de versioning.
+- [ ] Correlation_confidence='HIGH' para version range match con semver estándar (RN-CO08).
+- [ ] El workflow extrae los operadores versionStartIncluding, versionEndExcluding, versionStartExcluding, versionEndIncluding del JSON de configuraciones del CVE en NVD.
+
+**Notas Técnicas**:
+- NVD JSON Schema: `configurations[].nodes[].cpeMatch[].{versionStartIncluding, versionEndExcluding, ...}`
+- Library: semver disponible en Node.js runtime de n8n — `const semver = require('semver')`
+- RN-CO02, RN-CO08
+
+---
+
+US-015: Fallback Heurístico para Versiones No-Semver
+
+- **Título**: Correlación con versiones de formato no estándar
+- **Historia**: Como **Sistema**, quiero aplicar reglas heurísticas para correlacionar activos cuyas versiones no siguen el formato semver estándar, para no perder correlaciones por limitaciones de formato.
+- **Prioridad**: Media
+- **Dependencias**: US-014
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un activo con versión `2.4.49-ubuntu3` y un CVE que afecta `>=2.4.0 <2.4.50`, WHEN ejecuta correlación, THEN extrae la base `2.4.49`, aplica semver comparison, detecta el match, e inserta con correlation_confidence='MEDIUM'.
+- [ ] GIVEN un activo con versión `10.0.19041.1` (4 componentes), WHEN ejecuta correlación, THEN trunca a `10.0.19041`, aplica semver, e inserta con correlation_confidence='MEDIUM'.
+- [ ] GIVEN un activo con versión opaca `20231015`, WHEN ejecuta correlación, THEN registra como potencialmente afectado con correlation_confidence='LOW'.
+- [ ] Las alertas de correlaciones con confidence='LOW' incluyen la nota: "Verificación manual recomendada — versión no estándar" (RN-AL07).
+
+**Notas Técnicas**:
+- Regex para extraer base numérica: `/^(\d+\.\d+\.\d+)/`
+- RN-CO03, RN-CO09, RN-CO10, RN-CO11
+
+---
+
+US-016: Actualización de Status de CVEs Correlacionados
+
+- **Título**: Marcado de CVEs como procesados tras correlación
+- **Historia**: Como **Sistema**, quiero actualizar el status de los CVEs procesados en la etapa de correlación, para que el siguiente ciclo no re-procese CVEs ya correlacionados.
+- **Prioridad**: Alta
+- **Dependencias**: US-012, US-013, US-014
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un CVE con status='unprocessed' que completó la etapa de correlación (con o sin matches), WHEN finaliza el workflow de correlación, THEN su status se actualiza a 'correlated'.
+- [ ] CVEs con status='correlated' o 'prioritized' NO son re-procesados por el workflow de correlación.
+- [ ] La cantidad de CVEs actualizados a 'correlated' se registra en audit_log del workflow de correlación.
+
+**Notas Técnicas**:
+- SQL: `UPDATE cves SET status='correlated', updated_at=NOW() WHERE id=...`
+- RN-CO05
+
+---
+
+US-017: Audit Log de Correlación
+
+- **Título**: Registro de ejecución del workflow de correlación
+- **Historia**: Como **Administrador**, quiero que el workflow de correlación registre su ejecución en audit_log, para monitorear la tasa de correlación y detectar problemas.
+- **Prioridad**: Media
+- **Dependencias**: US-016, US-006
+
+**Criterios de Aceptación**:
+- [ ] GIVEN la ejecución del workflow de correlación, THEN se inserta un registro en audit_log con workflow_name='workflow-correlation'.
+- [ ] records_processed = cantidad de CVEs evaluados para correlación.
+- [ ] El registro incluye la cantidad de correlaciones nuevas generadas en applicable_vulnerabilities (en error_message o campo adicional).
+
+**Notas Técnicas**:
+- RN-RC06 aplica a todos los workflows del pipeline
+
+---
+
+EPIC 04 — Motor de Priorización (Etapa 4)
+
+US-018: Factor CVSS Base en Risk Score
+
+- **Título**: Integración de CVSS base score en la fórmula de priorización
+- **Historia**: Como **Sistema**, quiero incluir el CVSS base score de cada CVE como el factor de mayor peso en el risk score, para que la severidad técnica de la vulnerabilidad sea el predictor principal.
+- **Prioridad**: Alta
+- **Dependencias**: US-016
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una correlación con un CVE de CVSS base score=9.8, WHEN calcula risk score, THEN contribuye (0.35 × 9.8) = 3.43 al score total.
+- [ ] GIVEN una correlación con CVE sin CVSS score (nulo), WHEN calcula risk score, THEN CVSS_base=0 y contribuye 0 al score.
+- [ ] El factor CVSS base tiene peso 0.35 en la fórmula (configurable via variable de entorno WEIGHT_CVSS_BASE).
+
+**Notas Técnicas**:
+- RN-PR01, RN-PR10
+
+---
+
+US-019: Factor CVSS Temporal (Exploit Maturity)
+
+- **Título**: Aproximación de CVSS temporal score basada en madurez del exploit
+- **Historia**: Como **Sistema**, quiero ajustar el CVSS base score según la madurez del exploit disponible, para priorizar vulnerabilidades con exploits funcionales sobre las que solo tienen PoC.
+- **Prioridad**: Alta
+- **Dependencias**: US-018
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un CVE con exploit funcional disponible, WHEN calcula CVSS_temporal, THEN CVSS_temporal = CVSS_base × 0.95.
+- [ ] GIVEN un CVE con exploit activamente utilizado en ataques (activo en wild), WHEN calcula, THEN CVSS_temporal = CVSS_base × 1.00.
+- [ ] GIVEN un CVE sin exploit conocido o solo con PoC, WHEN calcula, THEN CVSS_temporal = CVSS_base × 0.90.
+- [ ] El factor de madurez se determina consultando las referencias del CVE para detectar keywords como "proof-of-concept", "exploit", "actively exploited".
+- [ ] El factor CVSS temporal tiene peso 0.25 en la fórmula.
+
+**Notas Técnicas**:
+- CVSS temporal formal requiere datos no siempre disponibles en NVD; se usa aproximación heurística (descrita en tesis Sección 4.5)
+- RN-PR03
+
+---
+
+US-020: Factor de Exposición a Internet (Shodan)
+
+- **Título**: Verificación de exposición pública de activos via Shodan API
+- **Historia**: Como **Sistema**, quiero consultar Shodan para confirmar si los activos afectados están expuestos a Internet, para priorizar vulnerabilidades en activos públicamente accesibles.
+- **Prioridad**: Alta
+- **Dependencias**: US-019, US-000c
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un activo con ip_address no nulo, WHEN consulta Shodan API `/shodan/host/{ip}`, THEN si Shodan retorna datos del host, shodan_exposed=TRUE y Exposure_factor=10.
+- [ ] GIVEN un activo donde Shodan no retorna datos (HTTP 404), THEN shodan_exposed=FALSE y Exposure_factor=3.
+- [ ] GIVEN que Shodan API retorna error HTTP 5xx o timeout, THEN shodan_exposed=FALSE, Exposure_factor=3 (conservador), y se registra la limitación (RN-PR04).
+- [ ] GIVEN un activo con ip_address=NULL, THEN se usa exposed_to_internet del inventario como proxy: TRUE→Exposure_factor=10, FALSE→Exposure_factor=3.
+- [ ] El factor de exposición tiene peso 0.20 en la fórmula.
+
+**Notas Técnicas**:
+- Endpoint: `GET https://api.shodan.io/shodan/host/{ip}?key={{SHODAN_API_KEY}}`
+- RN-PR04
+
+---
+
+US-021: Factores de Criticidad de Activo y CISA KEV
+
+- **Título**: Integración de criticidad del activo y catálogo CISA KEV en priorización
+- **Historia**: Como **Sistema**, quiero incorporar la criticidad del activo afectado y la presencia del CVE en el catálogo CISA KEV para completar el score multifactorial.
+- **Prioridad**: Alta
+- **Dependencias**: US-020
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un activo con criticality='CRITICAL', WHEN calcula, THEN Criticality_factor=10 y contribuye (0.15 × 10) = 1.5 al score.
+- [ ] GIVEN un CVE presente en el catálogo CISA KEV, WHEN calcula, THEN KEV_bonus=+2.0.
+- [ ] GIVEN un CVE ausente del catálogo CISA KEV, THEN KEV_bonus=0.
+- [ ] El catálogo CISA KEV se descarga una sola vez por día y se cachea en memoria o tabla auxiliar (RN-PR09).
+- [ ] La consulta al catálogo CISA KEV es por coincidencia de cve_id en el campo `cveID` del JSON feed.
+
+**Notas Técnicas**:
+- CISA KEV feed: `GET https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`
+- Cachear en tabla auxiliar o en n8n Static Data con TTL de 24h
+- RN-PR05, RN-PR06, RN-PR09
+
+---
+
+US-022: Cálculo de Risk Score Multifactorial
+
+- **Título**: Cálculo del risk score completo y asignación de criticality tier
+- **Historia**: Como **Sistema**, quiero calcular el risk score multifactorial aplicando la fórmula completa y asignarlo a cada correlación CVE-activo, para que las alertas se prioricen correctamente.
+- **Prioridad**: Alta
+- **Dependencias**: US-018, US-019, US-020, US-021
+
+**Criterios de Aceptación**:
+- [ ] GIVEN todos los factores calculados, WHEN aplica la fórmula, THEN Risk_Score = (0.35×CVSS_base) + (0.25×CVSS_temporal) + (0.20×Exposure_factor) + (0.15×Criticality_factor) + KEV_bonus.
+- [ ] GIVEN un resultado superior a 10.0, WHEN cappea, THEN risk_score = 10.0 en la base de datos (RN-PR02).
+- [ ] El ejemplo del Anexo D de la tesis debe producir risk_score=10.0 (cappado desde 11.26) para el CVE-2024-1234 con CVSS=9.8, exploit Functional, Shodan expuesto, activo CRITICAL, en KEV.
+- [ ] Los pesos son configurables via variables de entorno WEIGHT_CVSS_BASE (0.35), WEIGHT_CVSS_TEMPORAL (0.25), WEIGHT_EXPOSURE (0.20), WEIGHT_CRITICALITY (0.15).
+
+**Notas Técnicas**:
+- RN-PR01, RN-PR02, RN-PR10
+
+---
+
+US-023: Asignación de Criticality Tier
+
+- **Título**: Clasificación del tier de criticidad según risk score
+- **Historia**: Como **Sistema**, quiero asignar un tier de criticidad (CRITICAL/HIGH/MEDIUM/LOW) basado en el risk score calculado, para determinar el SLA de remediación correspondiente.
+- **Prioridad**: Alta
+- **Dependencias**: US-022
+
+**Criterios de Aceptación**:
+- [ ] GIVEN risk_score >= 8.5, THEN criticality_tier='CRITICAL'.
+- [ ] GIVEN risk_score en [7.0, 8.4], THEN criticality_tier='HIGH'.
+- [ ] GIVEN risk_score en [5.0, 6.9], THEN criticality_tier='MEDIUM'.
+- [ ] GIVEN risk_score < 5.0, THEN criticality_tier='LOW'.
+- [ ] El UPDATE a applicable_vulnerabilities incluye risk_score, criticality_tier, shodan_exposed, kev_listed, exploit_available.
+
+**Notas Técnicas**:
+- RN-PR07
+
+---
+
+US-024: SLA Deadline Automático por Trigger
+
+- **Título**: Cálculo automático del SLA deadline por trigger PostgreSQL
+- **Historia**: Como **Sistema**, quiero que el SLA deadline se calcule automáticamente al insertar una correlación con criticality_tier, para evitar errores de cálculo manual.
+- **Prioridad**: Alta
+- **Dependencias**: US-023, US-000a
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un INSERT en applicable_vulnerabilities con criticality_tier='CRITICAL', THEN sla_deadline = NOW() + INTERVAL '24 hours' (calculado por trigger).
+- [ ] GIVEN criticality_tier='HIGH', THEN sla_deadline = NOW() + INTERVAL '72 hours'.
+- [ ] GIVEN criticality_tier='MEDIUM', THEN sla_deadline = NOW() + INTERVAL '7 days'.
+- [ ] GIVEN criticality_tier='LOW', THEN sla_deadline = NOW() + INTERVAL '30 days'.
+- [ ] El trigger set_sla_deadline se activa en BEFORE INSERT ON applicable_vulnerabilities.
+- [ ] Si criticality_tier es NULL al insertar, sla_deadline permanece NULL (se calculará cuando se haga UPDATE con el tier).
+
+**Notas Técnicas**:
+- Trigger ya definido en schema.sql (US-000a)
+- RN-PR08
+
+---
+
+EPIC 05 — Generación y Envío de Alertas (Etapa 5)
+
+US-025: Template de Email HTML con Color-Coding
+
+- **Título**: Generación de template de email HTML por criticidad
+- **Historia**: Como **Sistema**, quiero generar emails HTML con color-coding según el tier de criticidad de cada vulnerabilidad, para que el receptor identifique visualmente la urgencia.
+- **Prioridad**: Alta
+- **Dependencias**: US-023
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una correlación con criticality_tier='CRITICAL', WHEN genera el email, THEN el header del email usa background-color #ff0000 (rojo).
+- [ ] GIVEN criticality_tier='HIGH', THEN background-color #ff8800 (naranja).
+- [ ] GIVEN criticality_tier='MEDIUM', THEN background-color #ffdd00 (amarillo).
+- [ ] GIVEN criticality_tier='LOW', THEN background-color #0088ff (azul).
+- [ ] El email incluye: CVE ID con link a NVD, descripción, CVSS score, risk_score/10, activos afectados (asset_name + IP), SLA deadline formateado, acciones recomendadas, y lista de referencias de parches del campo references del CVE.
+- [ ] El styling usa CSS inline (no externo) para compatibilidad con clientes de email.
+- [ ] El subject del email sigue el formato: `[CRITICAL] CVE-2024-XXXXX — Apache HTTP Server — Acción requerida en 24h`.
+
+**Notas Técnicas**:
+- Template en Function Node, generado como string HTML
+- RN-AL04, RN-AL06
+
+---
+
+US-026: Envío de Email via SMTP
+
+- **Título**: Envío del email de alerta al equipo de seguridad
+- **Historia**: Como **Sistema**, quiero enviar el email HTML generado al equipo de seguridad, para notificarles de vulnerabilidades críticas aplicables a su infraestructura.
+- **Prioridad**: Alta
+- **Dependencias**: US-025, US-000c
+
+**Criterios de Aceptación**:
+- [ ] GIVEN el template HTML generado, WHEN ejecuta el nodo Send Email, THEN el email se envía al destinatario configurado en SECURITY_TEAM_EMAIL.
+- [ ] Si el SMTP está no disponible, el nodo falla explícitamente y el workflow registra el error en audit_log (el envío se re-intentará en el próximo ciclo).
+- [ ] El email se envía como HTML (Content-Type: text/html).
+- [ ] El remitente es la dirección configurada en SMTP_USER.
+- [ ] El nodo usa las credenciales SMTP configuradas en n8n Credentials (no en texto plano).
+
+**Notas Técnicas**:
+- Nodo: Send Email de n8n
+- RN-AL03
+
+---
+
+US-027: Template de Mensaje Slack con Block Kit
+
+- **Título**: Generación de mensaje Slack con Block Kit y emoji por criticidad
+- **Historia**: Como **Sistema**, quiero generar mensajes Slack formateados con Block Kit e iconos visuales por criticidad, para que el equipo de seguridad pueda triagear rápidamente en su canal.
+- **Prioridad**: Alta
+- **Dependencias**: US-023
+
+**Criterios de Aceptación**:
+- [ ] GIVEN criticality_tier='CRITICAL', THEN el header del mensaje incluye emoji 🔴 y texto "CRITICAL Vulnerability Alert".
+- [ ] GIVEN criticality_tier='HIGH', THEN emoji 🟠.
+- [ ] GIVEN criticality_tier='MEDIUM', THEN emoji 🟡.
+- [ ] GIVEN criticality_tier='LOW', THEN emoji 🔵.
+- [ ] El mensaje incluye fields: CVE (con link Markdown a NVD), CVSS Score, Risk Score, SLA Deadline, Affected Assets.
+- [ ] El mensaje incluye un botón "View in NVD" que abre el link de NVD directamente.
+- [ ] El payload Block Kit es válido (verifiable en Slack Block Kit Builder).
+
+**Notas Técnicas**:
+- RN-AL05, RN-AL06
+
+---
+
+US-028: Nota de Verificación Manual para Confidence=LOW
+
+- **Título**: Advertencia en alertas de correlaciones con baja confianza
+- **Historia**: Como **Sistema**, quiero incluir una nota de verificación manual en alertas de correlaciones con confidence=LOW, para que el analista sepa que la correlación podría ser imprecisa.
+- **Prioridad**: Media
+- **Dependencias**: US-025, US-027
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta con correlation_confidence='LOW', WHEN genera el email y el mensaje Slack, THEN incluye nota visible: "⚠ Verificación manual recomendada: la correlación de versión no pudo ser confirmada con precisión semver — revisar manualmente si este activo está afectado.".
+- [ ] GIVEN correlation_confidence='MEDIUM', THEN incluye nota menos urgente: "ℹ Correlación con versión aproximada — se recomienda verificar la versión exacta instalada.".
+- [ ] GIVEN correlation_confidence='HIGH', THEN no se incluye ninguna nota adicional.
+
+**Notas Técnicas**:
+- RN-AL07, RN-CO03
+
+---
+
+US-029: Registro de Alertas Enviadas
+
+- **Título**: Creación de registro en vulnerability_alerts por cada alerta
+- **Historia**: Como **Sistema**, quiero registrar cada alerta enviada en vulnerability_alerts, para habilitar el tracking completo del ciclo de remediación.
+- **Prioridad**: Alta
+- **Dependencias**: US-026, US-027
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta enviada exitosamente por email, WHEN registra en BD, THEN se inserta en vulnerability_alerts con alert_type='EMAIL', status='notified', sent_at=NOW().
+- [ ] GIVEN una alerta enviada por Slack, THEN se inserta con alert_type='SLACK', status='notified', sent_at=NOW().
+- [ ] El campo recipient almacena la dirección de email o el canal Slack según el tipo.
+- [ ] El query de alertas pendientes verifica NOT EXISTS en vulnerability_alerts para no re-enviar alertas ya enviadas (RN-AL01).
+- [ ] Si el envío de email falla pero el Slack exitoso (o viceversa), se registra solo el exitoso.
+
+**Notas Técnicas**:
+- RN-AL01, RN-AL02, RN-AL08
+
+---
+
+US-030: Procesamiento por Orden de Prioridad
+
+- **Título**: Procesamiento de alertas pendientes ordenadas por risk_score
+- **Historia**: Como **Sistema**, quiero procesar y enviar alertas ordenadas por risk_score descendente, para asegurar que las vulnerabilidades más críticas sean notificadas primero.
+- **Prioridad**: Alta
+- **Dependencias**: US-029
+
+**Criterios de Aceptación**:
+- [ ] GIVEN múltiples correlaciones pendientes de notificación, WHEN el workflow de alertas las procesa, THEN las envía en orden de risk_score DESC.
+- [ ] Una correlación con risk_score=10.0 es notificada antes que una con risk_score=6.5.
+
+**Notas Técnicas**:
+- SQL: `ORDER BY risk_score DESC` en el query de correlaciones pendientes
+- RN-AL02
+
+---
+
+EPIC 06 — Tracking de Remediación
+
+US-031: Reconocimiento de Alerta (Acknowledged)
+
+- **Título**: Transición de estado 'notified' a 'acknowledged'
+- **Historia**: Como **Analista de Seguridad**, quiero reconocer una alerta para indicar que la revisé y voy a coordinar la remediación, para que el sistema sepa que está siendo gestionada.
+- **Prioridad**: Alta
+- **Dependencias**: US-029
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta con status='notified', WHEN el Analista la reconoce (vía webhook o UPDATE directo), THEN status='acknowledged', acknowledged_at=NOW(), acknowledged_by=[usuario].
+- [ ] Si se intenta reconocer una alerta con status='remediated' o 'false_positive', la operación es rechazada (estados terminales — RN-RE01).
+- [ ] La transición de 'notified' a 'acknowledged' es la única permitida desde 'notified' (además de 'false_positive').
+
+**Notas Técnicas**:
+- Webhook n8n receptor de actualizaciones de estado (workflow-remediation.json)
+- RN-RE01, RN-RE02
+
+---
+
+US-032: Inicio de Remediación (In Progress)
+
+- **Título**: Transición de estado 'acknowledged' a 'in_progress'
+- **Historia**: Como **Gestor de IT**, quiero marcar una alerta como en remediación cuando comienza el trabajo de aplicar el parche, para que el equipo de seguridad sepa que hay acción en curso.
+- **Prioridad**: Alta
+- **Dependencias**: US-031
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta con status='acknowledged', WHEN el Gestor de IT inicia la remediación, THEN status='in_progress', remediation_started_at=NOW().
+- [ ] No es posible pasar a 'in_progress' desde 'notified' directamente (requiere pasar por 'acknowledged').
+- [ ] El campo remediation_notes puede actualizar con descripción del plan de remediación.
+
+**Notas Técnicas**:
+- RN-RE01
+
+---
+
+US-033: Completar Remediación (Remediated)
+
+- **Título**: Transición de estado 'in_progress' a 'remediated'
+- **Historia**: Como **Gestor de IT**, quiero marcar una alerta como remediada cuando el parche fue aplicado y verificado, para que el sistema calcule el MTTR y cierre el ciclo.
+- **Prioridad**: Alta
+- **Dependencias**: US-032
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta con status='in_progress', WHEN se marca como remediada, THEN status='remediated', remediation_completed_at=NOW().
+- [ ] patch_version y verification_method son obligatorios para completar la remediación (RN-RE03).
+- [ ] Si remediation_completed_at < remediation_started_at, la operación es rechazada.
+- [ ] 'remediated' es estado terminal: no se permiten transiciones adicionales.
+- [ ] El cálculo de MTTR usa (remediation_completed_at - sent_at), no desde acknowledged_at.
+
+**Notas Técnicas**:
+- RN-RE01, RN-RE02, RN-RE03, RN-RE04
+
+---
+
+US-034: Marcado de Falso Positivo
+
+- **Título**: Transición de alerta a estado 'false_positive'
+- **Historia**: Como **Analista de Seguridad**, quiero marcar una alerta como falso positivo cuando verifico que el activo no está realmente afectado, para que no se generen re-notificaciones y se contabilice para métricas.
+- **Prioridad**: Media
+- **Dependencias**: US-031
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta con status='notified' o 'acknowledged', WHEN el Analista la marca como false_positive, THEN status='false_positive'.
+- [ ] 'false_positive' es estado terminal: no se permiten transiciones adicionales.
+- [ ] El campo remediation_notes debe incluir la razón del falso positivo (recomendado, no obligatorio).
+- [ ] Las alertas con status='false_positive' no son re-notificadas por el workflow de monitoreo SLA.
+- [ ] La tasa de falsos positivos es calculable mediante query SQL del Anexo E.
+
+**Notas Técnicas**:
+- RN-RE01
+
+---
+
+US-035: Re-notificación por Vencimiento de SLA
+
+- **Título**: Detección y re-notificación de SLA vencido
+- **Historia**: Como **Sistema**, quiero detectar cada hora si alguna alerta activa superó su SLA deadline sin ser resuelta, para escalar la situación al canal de escalación.
+- **Prioridad**: Alta
+- **Dependencias**: US-029, US-000c
+
+**Criterios de Aceptación**:
+- [ ] GIVEN una alerta con status='notified' o 'acknowledged' o 'in_progress' y CURRENT_TIMESTAMP > sla_deadline, WHEN el workflow de monitoreo ejecuta, THEN envía un mensaje al canal SLACK_WEBHOOK_ESCALATION.
+- [ ] El mensaje de escalación incluye: CVE ID, tier de criticidad, tiempo vencido (CURRENT_TIMESTAMP - sla_deadline formateado), y enlace NVD.
+- [ ] El workflow de monitoreo se ejecuta cada hora con cron `0 * * * *`.
+- [ ] Alertas con status='remediated' o 'false_positive' NO se incluyen en la verificación de SLA.
+- [ ] La re-notificación va al canal SLACK_WEBHOOK_ESCALATION (canal diferente al principal).
+
+**Notas Técnicas**:
+- Query: `WHERE CURRENT_TIMESTAMP > av.sla_deadline AND va.status NOT IN ('remediated', 'false_positive')`
+- RN-RE05, RN-RE06
+
+---
+
+EPIC 07 — Métricas de SecOps
+
+US-036: Cálculo de MTTD
+
+- **Título**: Query SQL para cálculo de Mean Time To Detect
+- **Historia**: Como **Responsable Organizacional**, quiero consultar el MTTD promedio del sistema, para medir la velocidad de detección de vulnerabilidades aplicables.
+- **Prioridad**: Alta
+- **Dependencias**: US-016
+
+**Criterios de Aceptación**:
+- [ ] GIVEN datos en applicable_vulnerabilities y cves, WHEN ejecuta la query de MTTD, THEN retorna AVG de horas entre published_date del CVE y created_at de la correlación.
+- [ ] El resultado es un valor numérico en horas con 2 decimales.
+- [ ] La query soporta filtro por rango de fechas (últimos 30 días por default).
+- [ ] Un MTTD < 4 horas indica que el sistema está cumpliendo el objetivo proyectado.
+
+**Notas Técnicas**:
+- SQL: `SELECT AVG(EXTRACT(EPOCH FROM (av.created_at - c.published_date))/3600) AS mttd_hours FROM applicable_vulnerabilities av JOIN cves c ON av.cve_id = c.id WHERE av.created_at >= NOW() - INTERVAL '30 days'`
+- Anexo E de la tesis
+
+---
+
+US-037: Cálculo de MTTR por Tier
+
+- **Título**: Query SQL para cálculo de Mean Time To Remediate por criticality tier
+- **Historia**: Como **Responsable Organizacional**, quiero consultar el MTTR desglosado por tier de criticidad, para evaluar si los SLAs se están cumpliendo en cada categoría.
+- **Prioridad**: Alta
+- **Dependencias**: US-033
+
+**Criterios de Aceptación**:
+- [ ] GIVEN alertas remediadas, WHEN ejecuta la query de MTTR, THEN retorna AVG de horas agrupado por criticality_tier.
+- [ ] MTTR se calcula como (remediation_completed_at - sent_at) en horas (RN-RE04).
+- [ ] La query filtra solo alertas con status='remediated'.
+- [ ] Un MTTR < 24h para CRITICAL indica cumplimiento del SLA objetivo.
+
+**Notas Técnicas**:
+- SQL del Anexo E de la tesis
+- RN-RE04
+
+---
+
+US-038: SLA Compliance Rate
+
+- **Título**: Query SQL para cálculo de tasa de cumplimiento de SLA
+- **Historia**: Como **Responsable Organizacional**, quiero consultar el porcentaje de vulnerabilidades remediadas dentro del SLA, para medir la efectividad operacional del equipo.
+- **Prioridad**: Alta
+- **Dependencias**: US-033
+
+**Criterios de Aceptación**:
+- [ ] GIVEN alertas remediadas, WHEN ejecuta la query de SLA compliance, THEN retorna el porcentaje de alertas donde remediation_completed_at <= sla_deadline, agrupado por criticality_tier.
+- [ ] La vista v_sla_compliance_metrics retorna las columnas: criticality_tier, total_vulnerabilities, within_sla, exceeded_sla, overdue, sla_compliance_pct.
+- [ ] Un SLA compliance > 85% para CRITICAL indica cumplimiento del objetivo proyectado.
+
+**Notas Técnicas**:
+- La vista v_sla_compliance_metrics está definida en schema.sql (US-000a)
+
+---
+
+US-039: Tasa de Falsos Positivos
+
+- **Título**: Query SQL para cálculo de tasa de falsos positivos
+- **Historia**: Como **Analista de Seguridad**, quiero consultar la tasa de falsos positivos del sistema, para evaluar la precisión del algoritmo de CPE matching.
+- **Prioridad**: Media
+- **Dependencias**: US-034
+
+**Criterios de Aceptación**:
+- [ ] GIVEN alertas en vulnerability_alerts, WHEN ejecuta la query de FP rate, THEN retorna el porcentaje de alertas con status='false_positive' sobre el total de alertas.
+- [ ] La query soporta filtro por rango de fechas.
+- [ ] Una tasa < 5% indica que el CPE matching está operando dentro del objetivo.
+
+**Notas Técnicas**:
+- SQL del Anexo E de la tesis
+
+---
+
+US-040: Tasa de Correlación Automática
+
+- **Título**: Cálculo de cobertura de correlación automática
+- **Historia**: Como **Administrador**, quiero saber qué porcentaje del inventario tiene correlaciones generadas automáticamente, para evaluar la cobertura del sistema.
+- **Prioridad**: Media
+- **Dependencias**: US-016
+
+**Criterios de Aceptación**:
+- [ ] GIVEN datos en applicable_vulnerabilities y software_inventory, WHEN calcula la tasa de correlación, THEN retorna el porcentaje de activos del inventario que tienen al menos una correlación en applicable_vulnerabilities.
+- [ ] Una cobertura > 90% del inventario con CPE preciso indica que el sistema está correlacionando correctamente.
+
+---
+
+EPIC 08 — Monitoreo y Operaciones
+
+US-041: Alertas de Fallo de Workflow
+
+- **Título**: Notificación de errores de ejecución de workflows
+- **Historia**: Como **Administrador**, quiero recibir una alerta en Slack cuando un workflow falla, para detectar y corregir problemas de integración rápidamente.
+- **Prioridad**: Alta
+- **Dependencias**: US-006, US-000c
+
+**Criterios de Aceptación**:
+- [ ] GIVEN un workflow que falla (API no disponible, BD no disponible, error de parseo), WHEN n8n registra el error, THEN se envía un mensaje al canal SLACK_WEBHOOK_ESCALATION con: nombre del workflow, tipo de error, timestamp, y sugerencia de acción.
+- [ ] El nodo de error handling está configurado en todos los workflows principales del pipeline.
+- [ ] La alerta de error es diferente a las alertas de vulnerabilidades (canal distinto, formato distinto).
+- [ ] El audit_log refleja el fallo con status=FAILED y error_message descriptivo.
+
+**Notas Técnicas**:
+- n8n soporta Error Workflow: un workflow especial que se activa cuando otro workflow falla
+- RN-RC07
+
+---
+
+US-042: README con Instrucciones de Setup
+
+- **Título**: Documentación de setup reproducible en máquina limpia
+- **Historia**: Como **Administrador**, quiero un README.md completo que me permita reproducir el entorno desde cero sin conocimiento previo del sistema.
+- **Prioridad**: Alta
+- **Dependencias**: US-000, US-000a, US-000b, US-000c, US-000d
+
+**Criterios de Aceptación**:
+- [ ] El README incluye secciones: Prerrequisitos, Instalación, Configuración (.env), Setup de BD, Importación de workflows n8n, Ejecución manual del pipeline, Descripción de cada workflow, Cálculo de métricas.
+- [ ] Un evaluador que siga exclusivamente el README puede levantar el sistema en una máquina limpia con Docker instalado.
+- [ ] El README documenta cómo obtener las API keys necesarias (NVD, Shodan) con links a las páginas de registro.
+- [ ] El README incluye comandos exactos para ejecutar schema.sql y seed.sql.
+- [ ] El README documenta el orden de importación de workflows en n8n y la configuración de credentials.
+
+---
+
+Resumen de Historias por Épica
+
+| Épica | Historias                          | Prioridad General |
+| ----- | ---------------------------------- | ----------------- |
+| 00 - Infraestructura y Setup       | US-000 a US-000d                   | Alta              |
+| 01 - Recolección de CVEs           | US-001 a US-006                    | Alta              |
+| 02 - Inventario de Software        | US-007 a US-011                    | Alta              |
+| 03 - Correlación CVE-Inventario    | US-012 a US-017                    | Alta              |
+| 04 - Motor de Priorización         | US-018 a US-024                    | Alta              |
+| 05 - Generación de Alertas         | US-025 a US-030                    | Alta              |
+| 06 - Tracking de Remediación       | US-031 a US-035                    | Alta/Media        |
+| 07 - Métricas de SecOps            | US-036 a US-040                    | Alta/Media        |
+| 08 - Monitoreo y Operaciones       | US-041 a US-042                    | Alta              |
+
+**Total: 43 historias de usuario** (US-000 a US-042) organizadas en 9 épicas, ordenadas por dependencia lógica de implementación.
+
+---
+
+Orden de Implementación Recomendado (Plan de Sprints)
+
+**Sprint 0**: EPIC 00 — Infraestructura y Setup
+> Docker Compose funcional con n8n + PostgreSQL + Redis. Schema SQL con todas las tablas, triggers, índices y vistas. Seed de inventario con activos CPE representativos. Variables de entorno documentadas. Workflows n8n importables.
+
+**Sprint 1**: EPIC 01 (Recolección) + EPIC 02 (Inventario)
+> Schedule trigger + NVD API HTTP Request + Function de parseo + Upsert PostgreSQL + Paginación + Audit log. CRUD de inventario via psql con validación CPE URI y criticality.
+
+**Sprint 2**: EPIC 03 (Correlación)
+> CPE matching completo: exact match + wildcard match + version range semver + fallback heurístico. Actualización de status. Audit log de correlación. Verificación con CVEs reales de NVD sobre el inventario seed.
+
+**Sprint 3**: EPIC 04 (Priorización)
+> Integración Shodan para Exposure_factor. Descarga y cache de CISA KEV. Cálculo de Risk Score multifactorial. Asignación de criticality_tier. Trigger SLA deadline. Verificación del ejemplo del Anexo D de la tesis.
+
+**Sprint 4**: EPIC 05 (Alertas)
+> Templates HTML email con color-coding. Send Email via SMTP. Block Kit Slack. HTTP Request a webhook Slack. Registro en vulnerability_alerts. Ordenamiento por risk_score.
+
+**Sprint 5**: EPIC 06 (Remediación) + EPIC 07 (Métricas)
+> State machine de alertas via webhook. Workflow de monitoreo SLA con re-notificación de escalación. Queries SQL de MTTD, MTTR, SLA compliance, FP rate. Verificación de resultados contra targets proyectados en la tesis.
+
+**Sprint 6**: EPIC 08 (Monitoreo) + Integración Final
+> Error workflow n8n para alertas de fallo. README completo. Checklist de entrega CE-01 a CE-17. Testing end-to-end del pipeline completo con CVEs reales de NVD.

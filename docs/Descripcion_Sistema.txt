@@ -1,0 +1,176 @@
+Sistema de Notificación Automatizada de Parches de Vulnerabilidades — Descripción Integral del Sistema
+
+1. Visión General
+
+El Sistema de Notificación Automatizada de Parches de Vulnerabilidades (VulnPatchNotifier) es una solución de Security Orchestration, Automation and Response (SOAR) diseñada para cerrar la brecha crítica que existe entre la publicación de una vulnerabilidad de software y la aplicación del parche correspondiente en sistemas productivos. Esta brecha, conocida como ventana de exposición, representa uno de los vectores de ataque más explotados por actores maliciosos: según el catálogo CISA KEV 2025, una proporción significativa de CVEs activamente explotados corresponde a vulnerabilidades con parches disponibles hace más de dos años.
+
+El sistema propuesto automatiza las cinco etapas del pipeline de gestión de vulnerabilidades — recolección, filtrado, correlación, priorización y notificación — mediante el motor de orquestación n8n, integrando tres fuentes de inteligencia de amenazas complementarias: la API del National Vulnerability Database (NVD), la API de Shodan para visibilidad de exposición real en Internet, y el catálogo JSON de Vulnerabilidades Explotadas Conocidas de CISA (KEV). El estado de correlaciones, alertas y remediación se persiste en PostgreSQL, habilitando tracking completo del ciclo de vida y cálculo de métricas SecOps cuantificables.
+
+El sistema contempla cinco actores que interactúan con la plataforma de maneras distintas y complementarias:
+
+- **Sistema (automatizado)**: Representa el pipeline orquestado por n8n. Ejecuta diariamente a las 02:00 UTC sin intervención humana. Consulta NVD API para obtener CVEs publicados en las últimas 24 horas, los parsea y normaliza, ejecuta CPE matching contra el inventario de software organizacional, calcula scores de riesgo multifactoriales consultando Shodan y CISA KEV, y envía alertas contextualizadas por email y Slack. También verifica vencimientos de SLA y re-notifica al equipo de seguridad cuando una vulnerabilidad critica está próxima a exceder su deadline.
+
+- **Analista de Seguridad**: Es el receptor primario de las alertas generadas por el sistema. Recibe notificaciones por email con HTML estructurado y mensajes en Slack con Block Kit interactivo. Su rol es triagear las alertas, marcarlas como reconocidas (acknowledged), determinar si son aplicables o constituyen falsos positivos, y coordinar con el equipo de IT para la remediación. Puede actualizar el estado de las alertas directamente en la base de datos o mediante el webhook de actualización expuesto por n8n.
+
+- **Gestor de IT / Equipo de Remediación**: Recibe instrucciones del Analista de Seguridad e implementa las acciones de remediación: aplica parches de seguridad, implementa workarounds temporales, o documenta controles compensatorios. Actualiza el estado de remediación en el sistema indicando versión de parche aplicada y método de verificación. Sus acciones alimentan el cálculo de MTTR (Mean Time To Remediate), métrica clave para evaluación de efectividad.
+
+- **Responsable Organizacional / CISO**: Accede a métricas agregadas de postura de seguridad mediante queries SQL predefinidas o dashboards. Visualiza SLA compliance por criticidad, trending de MTTD/MTTR, distribución de vulnerabilidades por activo/criticidad, y tasa de falsos positivos. Su perspectiva es estratégica: evalúa si el programa de gestión de vulnerabilidades está cumpliendo objetivos y toma decisiones de inversión en infraestructura de seguridad.
+
+- **Administrador del Sistema**: Gestiona el entorno técnico: mantiene el inventario de software actualizado con nomenclatura CPE, configura variables de entorno, administra la instancia n8n self-hosted, gestiona usuarios, ajusta los pesos del motor de priorización según el perfil de riesgo de la organización, y garantiza la operación continua del pipeline (monitoreo de workflows, backups de PostgreSQL, actualizaciones de n8n).
+
+Los objetivos principales del sistema son: reducir el MTTD (Mean Time To Detect) de ciclos manuales de 7–15 días a ciclos automatizados de 2–4 horas para vulnerabilidades críticas; garantizar que el 95% de CVEs aplicables sean identificados automáticamente mediante CPE matching; implementar SLAs diferenciados por criticidad con tracking automatizado de cumplimiento; y proporcionar un sistema completamente basado en tecnologías open-source que elimine barreras de costo de licenciamiento (USD 25.000–100.000 anuales de soluciones enterprise equivalentes).
+
+---
+
+2. Stack Tecnológico
+
+2.1 Motor de Orquestación — n8n
+
+n8n es la pieza central de la arquitectura. Es una plataforma de automatización de workflows de código abierto (fair-code license) que permite construir pipelines complejos mediante una interfaz visual basada en nodos, sin necesidad de escribir código de infraestructura. Cada nodo representa una operación: una llamada HTTP, una query SQL, una condición lógica, una función JavaScript, o un envío de email.
+
+La elección de n8n frente a alternativas fue fundamentada: Apache Airflow fue descartado por su alta curva de aprendizaje (requiere Python y definición de DAGs), Make/Integromat fue descartado por su modelo SaaS propietario sin self-hosting. n8n combina interfaz visual accesible, ejecución de JavaScript custom en Function Nodes para lógica compleja de CPE matching, integración nativa con PostgreSQL, scheduler cron integrado, despliegue mediante Docker, y costo de licenciamiento cero en modalidad self-hosted.
+
+Los Function Nodes de n8n ejecutan JavaScript con acceso al runtime de Node.js 20 LTS, permitiendo importar bibliotecas disponibles en el entorno (como semver para comparación de versiones) y acceder al array global items que contiene los datos provenientes del nodo anterior del pipeline.
+
+2.2 Base de Datos — PostgreSQL 16
+
+PostgreSQL fue seleccionado por sus características específicas que satisfacen requisitos del sistema: garantías ACID para mantener consistencia entre correlaciones y alertas generadas; soporte de tipo JSONB para almacenar estructuras de configuraciones CPE complejas con capacidad de indexación; tipo INET para almacenar y consultar direcciones IP; triggers PL/pgSQL para lógica de negocio como cálculo automático de SLA deadlines; vistas SQL para abstracción de queries complejas de métricas; e índices especializados (BRIN para timestamps, índices parciales para queries frecuentes de status).
+
+El schema vulnerability_management encapsula todas las tablas, previniendo colisiones de nombres y facilitando gestión de permisos por schema. El usuario n8n_user tiene privilegios completos sobre el schema; otros usuarios del servidor PostgreSQL no tienen acceso por defecto.
+
+2.3 APIs Externas
+
+NVD API 2.0 (National Vulnerability Database — NIST): Provee acceso programático a la base de datos comprensiva de vulnerabilidades. El endpoint /cves permite filtrar por fecha de publicación (pubStartDate, pubEndDate), severidad CVSS, y paginar resultados hasta 2000 por request. Requiere autenticación mediante API key en header x-api-key. La respuesta JSON sigue el CVE JSON Schema 5.0 con estructura anidada compleja: cada CVE incluye descripciones multi-idioma, métricas CVSS v2 y v3, configuraciones vulnerables (CPE con operadores AND/OR lógicos), y referencias a advisories.
+
+Shodan API: Motor de búsqueda de dispositivos Internet que permite consultar si una IP específica está indexada (pública), qué servicios expone, y si alguno de esos servicios corresponde a software vulnerable. El endpoint /shodan/host/{ip} retorna información de servicios detectados, puertos abiertos, y banners de servicios. En el sistema, se utiliza para calcular el Exposure_factor del motor de priorización: si el activo es visible en Shodan, recibe factor 10; si no, factor 3.
+
+CISA KEV Catalog: Feed JSON publicado por la Agencia de Seguridad de Infraestructura y Ciberseguridad de EE.UU. que lista vulnerabilidades confirmadas como explotadas activamente en ataques reales. A diferencia de CVSS, que mide severidad teórica, KEV indica explotación confirmada en el mundo real. Su presencia en el motor de priorización como KEV_bonus (+2.0 puntos) asegura que vulnerabilidades moderadas en CVSS pero activamente explotadas reciban prioridad elevada. El feed se cachea 24 horas para evitar requests redundantes.
+
+2.4 Infraestructura de Despliegue
+
+Docker Compose orquesta tres contenedores en red privada: el servidor n8n (puerto 5678 expuesto para UI), PostgreSQL 16 (puerto 5432 expuesto solo internamente), y Redis 7 (utilizado como store de session y cache por n8n, no expuesto). La comunicación entre n8n y PostgreSQL ocurre exclusivamente dentro de la red Docker privada; PostgreSQL nunca es accesible directamente desde Internet. Las variables sensibles (API keys, passwords) se inyectan mediante archivo .env montado como secrets en los contenedores.
+
+---
+
+3. Arquitectura del Sistema
+
+3.1 Arquitectura del Pipeline
+
+El sistema implementa una arquitectura de pipeline de procesamiento de datos donde cada etapa tiene responsabilidad única, escribe en tablas específicas, y no tiene dependencias hacia etapas posteriores. Esta separación de responsabilidades permite testear cada workflow de forma independiente, simplifica el debugging (los datos intermedios persisten en PostgreSQL y son inspeccionables), y habilita re-ejecución parcial del pipeline en caso de falla.
+
+La atomicidad de cada etapa está garantizada por el comportamiento transaccional de los nodos PostgreSQL de n8n: si una inserción falla, el registro permanece en el estado anterior (por ejemplo, status='unprocessed' si la correlación falla), permitiendo re-procesamiento en la siguiente ejecución sin datos corruptos.
+
+3.2 CPE Matching — Algoritmo de Correlación
+
+El componente más complejo del sistema es el algoritmo de CPE matching implementado en el Function Node del workflow de correlación. La correlación automatizada es el diferencial clave que elimina el trabajo manual de revisar cada CVE y determinar si afecta componentes de la organización.
+
+El algoritmo implementa tres estrategias de matching en orden de precisión:
+
+Exact Match: Los strings CPE del CVE y del inventario son idénticos. Correlation_confidence = HIGH. Es el caso más preciso pero el menos frecuente, ya que requiere coincidencia exacta de vendor, producto, y versión.
+
+Wildcard Match: El CPE del CVE contiene asterisco (*) en el componente de versión, indicando que todas las versiones del producto están afectadas. Se verifica que vendor y producto coincidan; la versión del inventario no se evalúa. Correlation_confidence = HIGH. Por ejemplo: un CVE que afecta cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:* hace match con cualquier versión de Log4j en el inventario.
+
+Version Range Match: El CVE especifica rangos de versión mediante operadores versionStartIncluding, versionEndExcluding (u equivalentes) definidos en el JSON Schema de NVD. Se compara la versión del activo en inventario contra el rango usando semantic versioning (semver). La biblioteca semver de Node.js implementa la especificación semver.org v2.0.0 con soporte de comparadores >=, <=, >, <. Correlation_confidence = HIGH para versiones semver estándar.
+
+Fallback Heurístico (versiones no-semver): Para versiones con sufijos de distribución (2.4.49-ubuntu3), versiones de cuatro componentes (10.0.19041.1), o versiones opacas (20231015), se aplican reglas heurísticas que extraen el componente numérico base y ejecutan la comparación sobre ese subset. Correlation_confidence = MEDIUM o LOW según el tipo de fallback aplicado. Las alertas generadas incluyen nota de verificación manual recomendada.
+
+3.3 SLA State Machine — Ciclo de Vida de una Alerta
+
+Las alertas siguen una máquina de estados lineal con estados terminales definidos:
+
+notified → acknowledged → in_progress → remediated (terminal)
+notified → false_positive (terminal)
+
+Transiciones permitidas:
+notified      → acknowledged    (Analista confirma recepción)
+acknowledged  → in_progress     (IT comienza remediación)
+in_progress   → remediated      (parche aplicado y verificado)
+notified      → false_positive  (correlación incorrecta identificada)
+acknowledged  → false_positive  (correlación incorrecta identificada post-reconocimiento)
+
+Estados terminales: remediated, false_positive.
+No se permiten retrocesos de estados ni transiciones saltadas.
+Toda transición actualiza updated_at automáticamente mediante trigger.
+
+---
+
+4. Reglas de Negocio
+
+4.1 Dominio: Recolección
+
+RN-RC01: El workflow de recolección se ejecuta exactamente una vez por día a las 02:00 UTC mediante cron trigger.
+RN-RC02: Solo se consultan CVEs publicados en las últimas 24 horas (pubStartDate=yesterday, pubEndDate=today).
+RN-RC03: El procesamiento es idempotente: re-ejecuciones en el mismo día no duplican registros en cves (ON CONFLICT DO UPDATE).
+RN-RC04: Si NVD API retorna más de 2000 resultados, se deben paginar las requests hasta obtener todos los CVEs del día.
+RN-RC05: CVEs sin CVSS v3 deben caer back a CVSS v2; CVEs sin ningún score CVSS se almacenan con campos nulos y se procesan con CVSS_base=0.
+RN-RC06: Toda ejecución de workflow debe registrar un entry en audit_log con status (SUCCESS/FAILED/PARTIAL) y records_processed.
+
+4.2 Dominio: Inventario de Software
+
+RN-IN01: Todo activo en software_inventory debe tener un CPE URI válido con formato cpe:2.3:a:vendor:product:version:...
+RN-IN02: La criticality del activo es CRITICAL, HIGH, MEDIUM, o LOW — no se permiten otros valores.
+RN-IN03: Cada CPE URI debe ser único en la tabla (UNIQUE constraint).
+RN-IN04: El campo exposed_to_internet representa el conocimiento previo de exposición; el campo shodan_exposed en applicable_vulnerabilities representa la confirmación real de Shodan.
+RN-IN05: No se permite eliminar físicamente activos del inventario si tienen correlaciones en applicable_vulnerabilities (FK CASCADE protege integridad referencial).
+
+4.3 Dominio: Correlación
+
+RN-CO01: La correlación se ejecuta solo sobre CVEs con status='unprocessed'.
+RN-CO02: Un par (cve_id, software_id) es único en applicable_vulnerabilities (UNIQUE constraint); re-correlaciones no generan duplicados.
+RN-CO03: El campo correlation_confidence refleja la precisión del match: HIGH para exact/wildcard/semver estándar, MEDIUM para fallback heurístico, LOW para versiones opacas.
+RN-CO04: CVEs sin configuraciones CPE en NVD (campo configurations vacío o nulo) no pueden ser correlacionados automáticamente y permanecen con status='unprocessed'.
+RN-CO05: Al finalizar la correlación de un CVE (con o sin matches), su status se actualiza a 'correlated'.
+
+4.4 Dominio: Priorización
+
+RN-PR01: El Risk_Score siempre se cappea en 10.0 aunque la fórmula produzca valores superiores.
+RN-PR02: Si Shodan API no está disponible o retorna error, se usa Exposure_factor=3 (no expuesto) como valor conservador y se registra la limitación en el campo notes del activo.
+RN-PR03: El catálogo CISA KEV se descarga una vez por día y se cachea; no se consulta por CVE individual.
+RN-PR04: Los pesos del motor de priorización (0.35, 0.25, 0.20, 0.15) son configurables via variables de entorno para que cada organización los ajuste según su perfil de riesgo.
+RN-PR05: El SLA deadline se calcula automáticamente via trigger PostgreSQL en el INSERT a applicable_vulnerabilities; el workflow no debe calcularlo manualmente.
+RN-PR06: Al finalizar priorización de un CVE, su status se actualiza a 'prioritized'.
+
+4.5 Dominio: Alertas
+
+RN-AL01: Las alertas se generan solo para correlaciones con criticality_tier definido (IS NOT NULL) y sin alerta previa (NOT EXISTS en vulnerability_alerts).
+RN-AL02: Las alertas se procesan ordenadas por risk_score DESC para enviar primero las más críticas.
+RN-AL03: Se genera siempre al menos una alerta por canal configurado (EMAIL + SLACK) por correlación.
+RN-AL04: El template de email usa color-coding: CRITICAL=rojo, HIGH=naranja, MEDIUM=amarillo, LOW=azul.
+RN-AL05: El mensaje Slack usa emoji por tier: 🔴 CRITICAL, 🟠 HIGH, 🟡 MEDIUM, 🔵 LOW.
+RN-AL06: El SLA deadline se incluye explícitamente en el cuerpo del email y del mensaje Slack.
+RN-AL07: Cada alerta enviada genera un registro en vulnerability_alerts con status='notified' y timestamp sent_at.
+
+4.6 Dominio: Remediación y Tracking
+
+RN-RE01: Solo se permiten transiciones de estado en la dirección definida por la state machine (RN-AL-SM en Historias de Usuario).
+RN-RE02: El campo remediation_completed_at debe ser posterior a remediation_started_at; si no, la transición es rechazada.
+RN-RE03: Al marcar una alerta como remediated, se deben registrar obligatoriamente patch_version y verification_method.
+RN-RE04: El MTTR se calcula como AVG(remediation_completed_at - sent_at), no desde acknowledged_at.
+RN-RE05: El workflow de monitoreo SLA verifica cada hora si alguna alerta activa (not in terminal states) ha superado sla_deadline; de ser así, re-notifica al canal de escalación.
+
+---
+
+5. Evaluación del Sistema
+
+5.1 Criterios de Evaluación Técnica
+
+Pipeline y Orquestación: Verifica que los 5 workflows estén correctamente implementados y encadenados. Se verifica que el Schedule Trigger ejecute a las 02:00 UTC, que la paginación de NVD API funcione correctamente, que el CPE matching implemente los tres algoritmos más fallback heurístico, y que el motor de priorización aplique correctamente la fórmula multifactorial con capping en 10.0.
+
+Modelo de Datos: Verifica implementación correcta de las 5 tablas con constraints, índices, FK, triggers y vistas. Se verifica especialmente que el trigger set_sla_deadline calcule correctamente los deadlines por criticidad, que la UNIQUE constraint de applicable_vulnerabilities prevenga duplicados, y que las vistas retornen datos coherentes.
+
+Integración de APIs: Verifica autenticación correcta con NVD (API key en header), parsing robusto del JSON Schema NVD 2.0 (incluyendo fallback CVSS v2), integración con Shodan para Exposure_factor, y parsing del CISA KEV catalog con caching de 24 horas.
+
+Alertas y Templates: Verifica que el template HTML de email incluya color-coding por criticidad, que el payload Slack Block Kit sea válido, que ambos canales de notificación incluyan CVE ID, descripción, CVSS, risk_score, activos afectados y SLA deadline, y que cada alerta genere registro en vulnerability_alerts.
+
+Tracking de Remediación: Verifica que la state machine esté correctamente implementada (no permite transiciones inválidas), que los timestamps de tracking sean precisos, y que las métricas MTTD, MTTR y SLA compliance sean calculables via queries SQL predefinidas.
+
+Infraestructura y Entrega: Verifica que docker-compose up -d levante el entorno completo sin errores, que el schema SQL sea ejecutable en PostgreSQL limpio, que los workflows sean importables desde n8n UI, y que el README permita reproducir el entorno en máquina limpia siguiendo exclusivamente sus instrucciones.
+
+5.2 Escala de Métricas Objetivo
+
+MTTD proyectado:           2–4 horas (vs. 168h baseline manual)
+MTTR Critical proyectado:  < 24 horas con SLA forzado
+Tasa de correlación:       > 95% para software con CPE estándar
+SLA compliance:            > 85%
+Falsos positivos:          < 5%
+Cobertura inventario CPE:  > 90%

@@ -1,0 +1,295 @@
+{
+  "name": "workflow-correlation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "correlation-trigger",
+        "responseMode": "onReceived",
+        "responseData": "noData",
+        "options": {}
+      },
+      "id": "9a8b7c6d-5e4f-4321-abcd-ef0123456789",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "correlation-trigger-v1"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nSELECT id, cve_id, configurations, cvss_v3_base_score, cvss_v3_severity\nFROM vulnerability_management.cves\nWHERE status = 'unprocessed'\n  AND published_date >= NOW() - INTERVAL '26 hours'\nORDER BY id",
+        "options": {}
+      },
+      "id": "1b2c3d4e-5f6a-4789-bcde-f01234567890",
+      "name": "Query Unprocessed CVEs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 300],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nSELECT id, cpe_uri, vendor, product, version, asset_name, criticality, exposed_to_internet\nFROM vulnerability_management.software_inventory\nORDER BY id",
+        "options": {}
+      },
+      "id": "2c3d4e5f-6a7b-4890-cdef-012345678901",
+      "name": "Query Software Inventory",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// $input.all()  = inventory rows (direct input from Query Software Inventory)\n// $('Query Unprocessed CVEs').all() = CVE rows\n\nconst cves = $('Query Unprocessed CVEs').all().map(i => i.json);\nconst inventory = $input.all().map(i => i.json);\n\nif (cves.length === 0) {\n  return [{ json: { _noMatches: true, processedCveDbIds: '', processedCount: 0 } }];\n}\n\nconst processedCveDbIds = cves.map(c => c.id).join(',');\n\n// ── CPE helpers ──────────────────────────────────────────────────────────────\n\nfunction extractVulnerableCpes(configurations) {\n  if (!configurations) return [];\n  let cfg = configurations;\n  if (typeof cfg === 'string') {\n    try { cfg = JSON.parse(cfg); } catch(e) { return []; }\n  }\n  if (!Array.isArray(cfg)) return [];\n  const entries = [];\n  function walk(node) {\n    if (Array.isArray(node.cpeMatch)) {\n      for (const m of node.cpeMatch) {\n        if (m.vulnerable !== false) entries.push(m);\n      }\n    }\n    if (Array.isArray(node.nodes)) {\n      for (const child of node.nodes) walk(child);\n    }\n  }\n  for (const top of cfg) {\n    walk(top);\n  }\n  return entries;\n}\n\nfunction parseCpe(s) {\n  if (!s) return null;\n  const p = s.split(':');\n  if (p.length < 6) return null;\n  return { vendor: p[3], product: p[4], version: p[5] };\n}\n\n// Numeric version comparison; returns negative/0/positive or null if unparseable\nfunction cmpVer(a, b) {\n  if (!a || !b || a === '*' || b === '*' || a === '-' || b === '-') return null;\n  const clean = v => v.replace(/[^0-9.]/g, '.').split('.').map(Number).filter(n => !isNaN(n));\n  const pa = clean(a), pb = clean(b);\n  if (!pa.length || !pb.length) return null;\n  const len = Math.max(pa.length, pb.length);\n  for (let i = 0; i < len; i++) {\n    const d = (pa[i] || 0) - (pb[i] || 0);\n    if (d !== 0) return d;\n  }\n  return 0;\n}\n\n// Returns 'HIGH' | 'MEDIUM' | 'LOW' | null\nfunction matchCpe(invUri, entry) {\n  const inv = parseCpe(invUri);\n  const nvd = parseCpe(entry.criteria);\n  if (!inv || !nvd) return null;\n\n  // 1. Exact string match\n  if (invUri === entry.criteria) return 'HIGH';\n\n  // Vendor and product must align before going further\n  const vMatch = nvd.vendor === '*' || inv.vendor === nvd.vendor;\n  const pMatch = nvd.product === '*' || inv.product === nvd.product;\n  if (!vMatch || !pMatch) return null;\n\n  // 2. Version range match (versionStartIncluding / versionEndExcluding / versionEndIncluding)\n  const hasRange = entry.versionStartIncluding || entry.versionEndExcluding || entry.versionEndIncluding;\n  if (hasRange && inv.version && inv.version !== '*') {\n    let inRange = true;\n    if (entry.versionStartIncluding) {\n      const c = cmpVer(inv.version, entry.versionStartIncluding);\n      if (c === null || c < 0) inRange = false;\n    }\n    if (inRange && entry.versionEndExcluding) {\n      const c = cmpVer(inv.version, entry.versionEndExcluding);\n      if (c === null || c >= 0) inRange = false;\n    }\n    if (inRange && entry.versionEndIncluding) {\n      const c = cmpVer(inv.version, entry.versionEndIncluding);\n      if (c === null || c > 0) inRange = false;\n    }\n    if (inRange) return 'HIGH';\n  }\n\n  // 3. NVD criteria wildcards the version → vendor+product match is enough\n  if (nvd.version === '*' || nvd.version === '-') return 'MEDIUM';\n\n  // 4. NVD specifies exact version and it matches\n  if (nvd.version && inv.version === nvd.version) return 'HIGH';\n\n  // 5. Heuristic: same vendor+product, version differs or non-semver\n  return 'LOW';\n}\n\n// ── Main matching loop ───────────────────────────────────────────────────────\n\nconst matches = [];\n\nfor (const cve of cves) {\n  const cpeEntries = extractVulnerableCpes(cve.configurations);\n  if (!cpeEntries.length) continue; // No CPE config → cannot correlate\n\n  for (const inv of inventory) {\n    let best = null;\n\n    for (const entry of cpeEntries) {\n      const conf = matchCpe(inv.cpe_uri, entry);\n      if (!conf) continue;\n      if (conf === 'HIGH') { best = 'HIGH'; break; } // Can't improve further\n      if (conf === 'MEDIUM' && best !== 'HIGH') best = 'MEDIUM';\n      else if (conf === 'LOW' && !best) best = 'LOW';\n    }\n\n    if (best) {\n      matches.push({\n        json: {\n          cve_db_id:              cve.id,\n          software_id:            inv.id,\n          correlation_confidence: best,\n          _summary: { processedCveDbIds, processedCount: cves.length }\n        }\n      });\n    }\n  }\n}\n\nif (!matches.length) {\n  return [{ json: { _noMatches: true, processedCveDbIds, processedCount: cves.length } }];\n}\n\nreturn matches;"
+      },
+      "id": "3d4e5f6a-7b8c-4901-def0-123456789012",
+      "name": "Code CPE Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-match-exists",
+              "leftValue": "={{ $json.cve_db_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4e5f6a7b-8c9d-4012-ef01-234567890123",
+      "name": "IF Has Matches",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.applicable_vulnerabilities\n  (cve_id, software_id, correlation_confidence)\nVALUES ({{ $json.cve_db_id }}, {{ $json.software_id }}, '{{ $json.correlation_confidence }}')\nON CONFLICT (cve_id, software_id) DO NOTHING",
+        "options": {
+          "queryBatching": "independently"
+        }
+      },
+      "id": "5f6a7b8c-9d0e-4123-f012-345678901234",
+      "name": "Postgres Insert Correlations",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 180],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const inserted = $input.all();\nconst firstMatch = $('Code CPE Match').first();\nconst summary = (firstMatch && firstMatch.json._summary) ? firstMatch.json._summary : {};\n\nreturn [{\n  json: {\n    correlationsInserted: inserted.length,\n    processedCveCount:    summary.processedCount    || 0,\n    processedCveDbIds:    summary.processedCveDbIds || ''\n  }\n}];"
+      },
+      "id": "6a7b8c9d-0e1f-4234-0123-456789012345",
+      "name": "Code Stats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nUPDATE vulnerability_management.cves\nSET status = 'correlated'\nWHERE status = 'unprocessed'\n  AND '{{ $json.processedCveDbIds }}' <> ''\n  AND id = ANY(string_to_array('{{ $json.processedCveDbIds }}', ',')::int[])",
+        "options": {}
+      },
+      "id": "7b8c9d0e-1f2a-4345-1234-567890123456",
+      "name": "Postgres Update CVE Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 180],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, executed_at)\nVALUES ('workflow-correlation', '{{ $execution.id }}', 'SUCCESS', {{ $json.correlationsInserted }}, NOW())",
+        "options": {}
+      },
+      "id": "8c9d0e1f-2a3b-4456-2345-678901234567",
+      "name": "Postgres Audit Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 180],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nUPDATE vulnerability_management.cves\nSET status = 'correlated'\nWHERE status = 'unprocessed'\n  AND '{{ $json.processedCveDbIds }}' <> ''\n  AND id = ANY(string_to_array('{{ $json.processedCveDbIds }}', ',')::int[])",
+        "options": {}
+      },
+      "id": "9d0e1f2a-3b4c-4567-3456-789012345678",
+      "name": "Postgres Update Status No Match",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 460],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, executed_at)\nVALUES ('workflow-correlation', '{{ $execution.id }}', 'SUCCESS', 0, 'No CPE matches found for {{ $json.processedCount }} processed CVEs.', NOW())",
+        "options": {}
+      },
+      "id": "0e1f2a3b-4c5d-4678-4567-890123456789",
+      "name": "Postgres Audit No Matches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 460],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## workflow-correlation\n\n**Trigger:** POST webhook — llamado por workflow-collection al terminar, o manualmente.\n**Lee:** `cves` (status=unprocessed, últimas 26h) + `software_inventory`\n**Escribe:** `applicable_vulnerabilities`, `cves.status`, `audit_log`\n\n### Algoritmo CPE Match (4 niveles)\n\n| Nivel | Condición | Confidence |\n|-------|-----------|------------|\n| 1. Exact | `invUri === nvd.criteria` | HIGH |\n| 2. Version range | Versión del activo dentro de `versionStart/EndIncluding/Excluding` | HIGH |\n| 3. Wildcard | NVD tiene `version=*` o `version=-` | MEDIUM |\n| 4. Heurístico | Vendor+product coinciden, versión difiere o no-semver | LOW |\n\n### Notas\n- CVEs sin `configurations` se saltan (no CPE = no correlación posible).\n- `ON CONFLICT (cve_id, software_id) DO NOTHING` garantiza idempotencia.\n- `status='correlated'` se setea incluso si no hubo matches (CVE intentado y descartado).\n- Para llamar desde workflow-collection: HTTP POST a la webhook URL de este workflow.",
+        "height": 360,
+        "width": 500
+      },
+      "id": "sticky-correlation-doc",
+      "name": "Documentation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -140]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          { "node": "Query Unprocessed CVEs", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Query Unprocessed CVEs": {
+      "main": [
+        [
+          { "node": "Query Software Inventory", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Query Software Inventory": {
+      "main": [
+        [
+          { "node": "Code CPE Match", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Code CPE Match": {
+      "main": [
+        [
+          { "node": "IF Has Matches", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "IF Has Matches": {
+      "main": [
+        [
+          { "node": "Postgres Insert Correlations", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Postgres Update Status No Match", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres Insert Correlations": {
+      "main": [
+        [
+          { "node": "Code Stats", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Code Stats": {
+      "main": [
+        [
+          { "node": "Postgres Update CVE Status", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres Update CVE Status": {
+      "main": [
+        [
+          { "node": "Postgres Audit Success", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres Update Status No Match": {
+      "main": [
+        [
+          { "node": "Postgres Audit No Matches", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "versionId": "2b3c4d5e-6f7a-8901-bcde-f01234567891",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  },
+  "id": "correlation-v1",
+  "tags": []
+}

@@ -1,0 +1,251 @@
+{
+  "name": "workflow-prioritization",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "prioritization-trigger",
+        "responseMode": "onReceived",
+        "responseData": "noData",
+        "options": {}
+      },
+      "id": "aa01bb02-cc03-4dd0-ee04-ff0011223344",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "prioritization-trigger-v1"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+        "authentication": "none",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "bb02cc03-dd04-4ee0-ff05-001122334455",
+      "name": "HTTP Fetch CISA KEV",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nSELECT\n  av.id               AS av_id,\n  av.cve_id           AS cve_db_id,\n  av.software_id,\n  av.exploit_available,\n  c.cve_id            AS cve_id_str,\n  c.cvss_v3_base_score,\n  c.cvss_v3_severity,\n  si.criticality,\n  si.ip_address::text AS ip_address,\n  si.exposed_to_internet\nFROM vulnerability_management.applicable_vulnerabilities av\nJOIN vulnerability_management.cves c             ON c.id  = av.cve_id\nJOIN vulnerability_management.software_inventory si ON si.id = av.software_id\nWHERE av.risk_score IS NULL\nORDER BY av.id",
+        "options": {}
+      },
+      "id": "cc03dd04-ee05-4ff0-0011-223344556677",
+      "name": "Postgres Query Applicable",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://api.shodan.io/shodan/host/' + ($json.ip_address ? $json.ip_address : '0.0.0.0') }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $env.SHODAN_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "dd04ee05-ff06-4001-1122-334455667788",
+      "name": "HTTP Request Shodan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// KEV catalog fetched once at workflow start\nconst kevRaw = $('HTTP Fetch CISA KEV').first().json;\nconst kevSet = new Set(\n  ((kevRaw && kevRaw.vulnerabilities) || []).map(v => v.cveID)\n);\n\n// Original AV rows — same order as Shodan responses\nconst avItems  = $('Postgres Query Applicable').all().map(i => i.json);\nconst shodanItems = $input.all();\n\nif (!avItems.length) return [];\n\nconst results = [];\n\nfor (let i = 0; i < avItems.length; i++) {\n  const av     = avItems[i];\n  const shRaw  = shodanItems[i] ? shodanItems[i].json : null;\n\n  // Shodan exposed: response must have ip_str (successful lookup)\n  // 404 / error / null-IP sentinel → not exposed\n  const shodanExposed = !!(shRaw && shRaw.ip_str && !shRaw.error);\n\n  // KEV\n  const kevListed = kevSet.has(av.cve_id_str);\n\n  // CVSS base — v3 preferred; treat missing as 0\n  const cvssBase = parseFloat(av.cvss_v3_base_score) || 0;\n\n  // CVSS temporal: exploit_available → High multiplier (1.0), else Unproven (0.90)\n  const exploitMultiplier = av.exploit_available ? 1.0 : 0.90;\n  const cvssTemp = cvssBase * exploitMultiplier;\n\n  // Exposure factor — spec: Shodan visible=10, not visible=3\n  const exposureFactor = shodanExposed ? 10 : 3;\n\n  // Criticality factor from asset tier\n  const critMap = { CRITICAL: 10, HIGH: 7.5, MEDIUM: 5, LOW: 2.5 };\n  const critFactor = critMap[av.criticality] || 5;\n\n  // KEV bonus\n  const kevBonus = kevListed ? 2.0 : 0;\n\n  // Risk score formula (spec §2.4)\n  let riskScore = (0.35 * cvssBase)\n               + (0.25 * cvssTemp)\n               + (0.20 * exposureFactor)\n               + (0.15 * critFactor)\n               + kevBonus;\n\n  // Cap at 10.0, round to 2 decimals\n  riskScore = Math.round(Math.min(10.0, riskScore) * 100) / 100;\n\n  // Criticality tier thresholds (spec §2.4)\n  let criticalityTier;\n  if      (riskScore >= 8.5) criticalityTier = 'CRITICAL';\n  else if (riskScore >= 7.0) criticalityTier = 'HIGH';\n  else if (riskScore >= 5.0) criticalityTier = 'MEDIUM';\n  else                       criticalityTier = 'LOW';\n\n  results.push({\n    json: {\n      av_id:             av.av_id,\n      cve_db_id:         av.cve_db_id,\n      risk_score:        riskScore,\n      criticality_tier:  criticalityTier,\n      shodan_exposed:    shodanExposed,\n      kev_listed:        kevListed,\n      exploit_available: av.exploit_available || false\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "ee05ff06-0017-4112-2233-445566778899",
+      "name": "Code Calculate Risk Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nUPDATE vulnerability_management.applicable_vulnerabilities\nSET\n  risk_score        = {{ $json.risk_score }}::decimal,\n  criticality_tier  = '{{ $json.criticality_tier }}',\n  shodan_exposed    = {{ $json.shodan_exposed }}::boolean,\n  kev_listed        = {{ $json.kev_listed }}::boolean,\n  exploit_available = {{ $json.exploit_available }}::boolean\nWHERE id = {{ $json.av_id }}",
+        "options": {
+          "queryBatching": "independently"
+        }
+      },
+      "id": "ff06aa07-bb08-4223-3344-556677889900",
+      "name": "Postgres Update App Vuln",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 300],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const updated  = $input.all();\nconst avItems  = $('Postgres Query Applicable').all().map(i => i.json);\n\n// Unique CVE DB IDs (FK to cves.id) — deduplicated, for status UPDATE\nconst cveDbIds = [...new Set(avItems.map(i => i.cve_db_id))].join(',');\n\nreturn [{\n  json: {\n    recordsProcessed: updated.length,\n    cveDbIds\n  }\n}];"
+      },
+      "id": "aa07bb08-cc09-4334-4455-667788990011",
+      "name": "Code Stats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nUPDATE vulnerability_management.cves\nSET status = 'prioritized'\nWHERE status = 'correlated'\n  AND '{{ $json.cveDbIds }}' <> ''\n  AND id = ANY(string_to_array('{{ $json.cveDbIds }}', ',')::int[])",
+        "options": {}
+      },
+      "id": "bb08cc09-dd0a-4445-5566-778899001122",
+      "name": "Postgres Update CVE Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 300],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, executed_at)\nVALUES ('workflow-prioritization', '{{ $execution.id }}', 'SUCCESS', {{ $('Code Stats').first().json.recordsProcessed }}, NOW())",
+        "options": {}
+      },
+      "id": "cc09dd0a-ee0b-4556-6677-889900112233",
+      "name": "Postgres Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 300],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## workflow-prioritization\n\n**Trigger:** POST webhook — llamado por workflow-correlation al terminar, o manualmente.\n**Lee:** `applicable_vulnerabilities` (risk_score IS NULL) + `cves` + `software_inventory`\n**Escribe:** `applicable_vulnerabilities` (risk_score, criticality_tier, shodan_exposed, kev_listed), `cves.status`, `audit_log`\n\n### Fórmula de Risk Score (spec §2.4)\n```\nRisk_Score = (0.35 × CVSS_base)\n           + (0.25 × CVSS_temporal)\n           + (0.20 × Exposure_factor)\n           + (0.15 × Criticality_factor)\n           + KEV_bonus\n```\n\n| Variable | Valores |\n|----------|---------|\n| CVSS_temporal | CVSS_base × 0.90 (sin exploit) ó × 1.00 (con exploit) |\n| Exposure_factor | Shodan visible=10, no visible=3 |\n| Criticality_factor | CRITICAL=10, HIGH=7.5, MEDIUM=5, LOW=2.5 |\n| KEV_bonus | En CISA KEV=+2.0, no=0 |\n\n**Score cappado en 10.0**\n\n### Tiers de criticidad\n- CRITICAL ≥ 8.5 → SLA 24h\n- HIGH 7.0–8.4 → SLA 72h\n- MEDIUM 5.0–6.9 → SLA 7d\n- LOW < 5.0 → SLA 30d\n\n### Notas\n- `HTTP Request Shodan` usa `continueOnFail: true` → error/404 → `exposed=false` (fallback Exposure_factor=3).\n- Si `ip_address` es NULL → URL usa `0.0.0.0` como sentinel → Shodan devuelve 404 → no expuesto.\n- `HTTP Fetch CISA KEV` descarga el catálogo completo una vez por run. Para cacheo multi-run usar n8n Static Data.\n- `sla_deadline` se calcula automáticamente por el trigger de PostgreSQL en `applicable_vulnerabilities` al set `criticality_tier`.",
+        "height": 480,
+        "width": 520
+      },
+      "id": "sticky-prioritization-doc",
+      "name": "Documentation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -220]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          { "node": "HTTP Fetch CISA KEV", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "HTTP Fetch CISA KEV": {
+      "main": [
+        [
+          { "node": "Postgres Query Applicable", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres Query Applicable": {
+      "main": [
+        [
+          { "node": "HTTP Request Shodan", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "HTTP Request Shodan": {
+      "main": [
+        [
+          { "node": "Code Calculate Risk Score", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Code Calculate Risk Score": {
+      "main": [
+        [
+          { "node": "Postgres Update App Vuln", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres Update App Vuln": {
+      "main": [
+        [
+          { "node": "Code Stats", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Code Stats": {
+      "main": [
+        [
+          { "node": "Postgres Update CVE Status", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Postgres Update CVE Status": {
+      "main": [
+        [
+          { "node": "Postgres Audit Log", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "versionId": "3c4d5e6f-7a8b-9012-cdef-012345678902",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  },
+  "id": "prioritization-v1",
+  "tags": []
+}

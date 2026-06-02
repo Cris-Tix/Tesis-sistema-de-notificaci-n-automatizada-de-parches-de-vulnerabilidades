@@ -1,0 +1,421 @@
+🔐 VULN PATCH NOTIFIER
+Sistema de Notificación Automatizada de Parches de Vulnerabilidades
+
+Especificación Técnica del Sistema
+Versión 1.0  ·  Spec-Driven Development (SDD)  ·  Pipeline-First
+
+Campo         Valor
+Proyecto      Sistema de Notificación Automatizada de Parches de Vulnerabilidades
+Institución   Universidad Tecnológica Nacional — Facultad Regional Mendoza
+Carrera       Tecnicatura Universitaria en Programación (TUPaD)
+Modalidad     Trabajo Final de Tesis
+Stack         n8n + PostgreSQL + NVD API + Shodan API + CISA KEV
+Metodología   Spec-Driven Development (SDD)
+Versión doc.  1.0 — Arquitectura SDD + Pipeline 5 etapas + Feature-First
+
+---
+
+1. Visión General del Sistema
+
+El Sistema de Notificación Automatizada de Parches de Vulnerabilidades es una solución de Security Orchestration orientada a reducir la ventana de exposición organizacional ante CVEs publicados. El sistema integra múltiples fuentes de inteligencia de amenazas (NVD API, Shodan, CISA KEV), las orquesta mediante n8n, y persiste el estado de correlación y remediación en PostgreSQL.
+
+El pipeline opera de forma autónoma: se ejecuta diariamente a las 02:00 UTC, recolecta CVEs publicados en las últimas 24 horas, los correlaciona automáticamente contra el inventario de software de la organización usando nomenclatura CPE, calcula un score de riesgo multifactorial, y envía alertas contextualizadas por email y Slack a los equipos responsables.
+
+1.1 Objetivos del Sistema
+
+#       Actor                   Objetivo principal
+OBJ-01  Analista de Seguridad   Recibir alertas de CVEs aplicables con contexto accionable y SLA definido
+OBJ-02  Gestor de IT            Registrar el estado de remediación y marcar parches aplicados
+OBJ-03  Responsable Org.        Visualizar métricas de SLA compliance y postura de seguridad organizacional
+OBJ-04  Administrador           Configurar el sistema, mantener el inventario CPE, y gestionar workflows n8n
+OBJ-05  Sistema                 Ejecutar el pipeline automatizado de 5 etapas sin intervención humana
+OBJ-06  Sistema                 Garantizar trazabilidad completa del ciclo detección → notificación → remediación
+
+1.2 Alcance v1.0
+
+• Pipeline de 5 etapas orquestado en n8n: recolección → filtrado → correlación → priorización → alertas
+• Integración con NVD API 2.0 para recolección de CVEs publicados en las últimas 24h
+• Integración con Shodan API para verificación de exposición pública de activos
+• Integración con CISA KEV Catalog (JSON feed) para detección de vulnerabilidades explotadas activamente
+• Modelo de datos PostgreSQL con 5 tablas: cves, software_inventory, applicable_vulnerabilities, vulnerability_alerts, audit_log
+• CPE matching con soporte de exact match, wildcard match, y version range matching (semver)
+• Motor de priorización multifactorial con 5 factores ponderados (CVSS base, CVSS temporal, exposición, criticidad, KEV)
+• SLA diferenciado por criticidad: Critical 24h, High 72h, Medium 7 días, Low 30 días
+• Notificaciones via email (HTML con color-coding) y Slack (Block Kit con botón NVD)
+• Tracking completo de remediación: acknowledged → in_progress → remediated
+• Re-notificación automática ante vencimiento de SLA
+• Métricas de SecOps calculables mediante queries SQL: MTTD, MTTR, SLA compliance, tasa de correlación, tasa de falsos positivos
+• Despliegue completo con Docker Compose: n8n + PostgreSQL + Redis (cache de n8n)
+• Audit log de cada ejecución del workflow con timestamps y conteo de registros procesados
+
+FUERA DE ALCANCE: Remediación automatizada (aplicación automática de parches), validación post-patch,
+integración con sistemas de ticketing (Jira/ServiceNow), scanner activo de vulnerabilidades,
+integración con CVE Details (descartada por ausencia de API REST oficial — ver Sección 8.3 de tesis).
+
+1.3 Stack Tecnológico
+
+Capa            Tecnología              Versión     Rol en el sistema
+Orquestación    n8n (self-hosted)       1.x         Motor de workflows, scheduler cron, nodos HTTP/PostgreSQL/Email
+Base de Datos   PostgreSQL              16.x        Persistencia de CVEs, inventario, correlaciones, alertas
+Runtime         Node.js                 20.x LTS    Entorno de ejecución de n8n y Function nodes (JavaScript)
+Contenedores    Docker / Docker Compose 24.x        Despliegue portable y reproducible
+Cache           Redis                   7.x         Cache interno de n8n
+Fuente CVEs     NVD API                 2.0         Recolección de CVEs con CVSS, CPE, referencias
+Fuente Exp.     Shodan API              1.0         Verificación de exposición pública de activos
+Fuente KEV      CISA KEV Catalog        JSON feed   Detección de vulnerabilidades explotadas activamente
+Semver          semver (npm)            7.x         Comparación de versiones en CPE matching (via n8n Function)
+Testing         Postman                 11.x        Testing y debugging de APIs externas
+
+---
+
+2. Arquitectura del Sistema
+
+2.1 Pipeline de 5 Etapas — Flujo de Datos
+
+El sistema implementa un pipeline secuencial de 5 etapas ejecutadas como workflows n8n independientes encadenados.
+El flujo de datos es unidireccional: cada etapa produce output que alimenta la siguiente.
+Ninguna etapa puede leer de una etapa posterior ni saltear una etapa anterior.
+
+[DIAGRAMA: Pipeline de 5 Etapas]
+
+ETAPA 1         ETAPA 2             ETAPA 3             ETAPA 4             ETAPA 5
+Recolección  →  Filtrado/Norm.  →  Correlación  →  Priorización  →  Alertas
+NVD API         Function Node       CPE Matching        Risk Score          Email + Slack
+cves table      (JavaScript)        applicable_vuln     risk_score          vulnerability_alerts
+
+Regla de oro — flujo de datos:
+  Recolección → Filtrado → Correlación → Priorización → Alertas
+Ningún workflow de una etapa posterior puede modificar datos de etapas anteriores.
+Un workflow de Alertas nunca modifica la tabla cves. Un workflow de Correlación nunca envía notificaciones.
+
+Etapa   Workflow n8n                Responsabilidad                             Escribe en
+1       workflow-collection.json    Consulta NVD API, parsea, upsert CVEs       cves, audit_log
+2       (integrado en Etapa 1)      Filtrado y normalización de JSON NVD         (en memoria)
+3       workflow-correlation.json   CPE matching contra software_inventory       applicable_vulnerabilities
+4       workflow-prioritization.json Calcula risk_score, asigna criticality tier  applicable_vulnerabilities (update)
+5       workflow-alerts.json        Genera y envía alertas email + Slack         vulnerability_alerts
+
+2.2 Módulos del Sistema
+
+Módulo              Ubicación                   Descripción
+collection          workflows/collection/       Schedule trigger + HTTP NVD + Function parse + PostgreSQL upsert
+correlation         workflows/correlation/      PostgreSQL query CVEs + Function CPE matching + PostgreSQL insert
+prioritization      workflows/prioritization/   Function risk score + HTTP Shodan + HTTP CISA KEV + PostgreSQL update
+alerts              workflows/alerts/           PostgreSQL query pendientes + Send Email + HTTP Slack webhook
+remediation         workflows/remediation/      Webhook receptor de actualizaciones de estado (acknowledged/remediated)
+monitoring          workflows/monitoring/       Cron verificador de SLA vencidos + re-notificación
+database            db/                         schema.sql, migrations/, seed/
+config              config/                     docker-compose.yml, .env.example, n8n-config/
+
+2.3 Modelo de Datos PostgreSQL
+
+Schema: vulnerability_management
+
+Tabla                       PK              FK                                  Descripción
+cves                        id SERIAL       —                                   CVEs recolectados desde NVD API
+software_inventory          id SERIAL       —                                   Inventario de software con CPE
+applicable_vulnerabilities  id SERIAL       cve_id → cves, software_id → si     Correlaciones CVE ↔ activo con risk score
+vulnerability_alerts        id SERIAL       applicable_vulnerability_id → av    Alertas enviadas y tracking de remediación
+audit_log                   id SERIAL       —                                   Log de ejecuciones de workflows
+
+Flujo entre tablas:
+cves ────────────────────────────┐
+                                 ↓
+software_inventory ──────► applicable_vulnerabilities ──────► vulnerability_alerts
+                                 ↑
+                           (CPE matching)
+
+Tabla: cves
+Columna                 Tipo                Constraints             Descripción
+id                      SERIAL              PK                      Surrogate key
+cve_id                  VARCHAR(20)         UNIQUE NOT NULL          CVE-YYYY-NNNNN
+description             TEXT                NOT NULL                 Descripción en inglés
+cvss_v3_base_score      DECIMAL(3,1)        NULLABLE                 Score CVSS v3 base (0.0–10.0)
+cvss_v3_vector          VARCHAR(100)        NULLABLE                 Vector string CVSS v3
+cvss_v3_severity        VARCHAR(20)         NULLABLE                 CRITICAL/HIGH/MEDIUM/LOW
+cvss_v2_base_score      DECIMAL(3,1)        NULLABLE                 Fallback si v3 no disponible
+cwe_id                  VARCHAR(20)         NULLABLE                 Clasificación CWE
+published_date          TIMESTAMP           NOT NULL                 Fecha publicación en NVD
+last_modified_date      TIMESTAMP           NULLABLE                 Última modificación en NVD
+configurations          JSONB               NULLABLE                 CPEs afectados con operadores AND/OR
+references              JSONB               NULLABLE                 URLs de advisories y parches
+status                  VARCHAR(20)         DEFAULT 'unprocessed'    unprocessed / correlated / prioritized
+created_at              TIMESTAMP           DEFAULT NOW()
+updated_at              TIMESTAMP           DEFAULT NOW()            Auto-updated por trigger
+
+Tabla: software_inventory
+Columna                 Tipo                Constraints             Descripción
+id                      SERIAL              PK                      Surrogate key
+cpe_uri                 VARCHAR(255)        UNIQUE NOT NULL          cpe:2.3:a:vendor:product:version:...
+vendor                  VARCHAR(100)        NULLABLE                 Vendor del software
+product                 VARCHAR(100)        NULLABLE                 Nombre del producto
+version                 VARCHAR(50)         NULLABLE                 Versión instalada
+asset_name              VARCHAR(100)        NULLABLE                 Nombre del host/servidor
+ip_address              INET                NULLABLE                 IP del activo
+criticality             VARCHAR(20)         NOT NULL                 CRITICAL / HIGH / MEDIUM / LOW
+exposed_to_internet     BOOLEAN             DEFAULT FALSE            Exposición pública conocida
+owner_team              VARCHAR(100)        NULLABLE                 Equipo responsable
+notes                   TEXT                NULLABLE                 Observaciones adicionales
+created_at              TIMESTAMP           DEFAULT NOW()
+updated_at              TIMESTAMP           DEFAULT NOW()
+
+Tabla: applicable_vulnerabilities
+Columna                 Tipo                Constraints             Descripción
+id                      SERIAL              PK                      Surrogate key
+cve_id                  INTEGER             FK cves(id) CASCADE      Referencia al CVE
+software_id             INTEGER             FK software_inventory    Referencia al activo afectado
+risk_score              DECIMAL(4,2)        NULLABLE                 Score calculado (0–10, capped)
+criticality_tier        VARCHAR(20)         NULLABLE                 CRITICAL/HIGH/MEDIUM/LOW
+sla_deadline            TIMESTAMP           NULLABLE                 Auto-calculado por trigger
+correlation_confidence  VARCHAR(20)         DEFAULT 'HIGH'           HIGH / MEDIUM / LOW
+shodan_exposed          BOOLEAN             DEFAULT FALSE            Confirmado expuesto en Shodan
+kev_listed              BOOLEAN             DEFAULT FALSE            Presente en CISA KEV catalog
+exploit_available       BOOLEAN             DEFAULT FALSE            Exploit público disponible
+created_at              TIMESTAMP           DEFAULT NOW()
+updated_at              TIMESTAMP           DEFAULT NOW()
+UNIQUE(cve_id, software_id)
+
+Tabla: vulnerability_alerts
+Columna                     Tipo            Constraints             Descripción
+id                          SERIAL          PK                      Surrogate key
+applicable_vulnerability_id INTEGER         FK applicable_vuln       Referencia a correlación
+alert_type                  VARCHAR(20)     NOT NULL                 EMAIL / SLACK / WEBHOOK
+recipient                   VARCHAR(255)    NOT NULL                 Destinatario
+subject                     VARCHAR(255)    NULLABLE                 Asunto del email
+message_body                TEXT            NULLABLE                 Cuerpo del mensaje
+sent_at                     TIMESTAMP       DEFAULT NOW()            Timestamp de envío
+status                      VARCHAR(20)     DEFAULT 'notified'       notified / acknowledged / in_progress / remediated / false_positive
+acknowledged_at             TIMESTAMP       NULLABLE                 Timestamp de reconocimiento
+acknowledged_by             VARCHAR(100)    NULLABLE                 Usuario que reconoció
+remediation_started_at      TIMESTAMP       NULLABLE                 Inicio de remediación
+remediation_completed_at    TIMESTAMP       NULLABLE                 Fin de remediación
+remediation_notes           TEXT            NULLABLE                 Notas de remediación
+patch_version               VARCHAR(50)     NULLABLE                 Versión del parche aplicado
+verification_method         VARCHAR(100)    NULLABLE                 Método de verificación
+created_at                  TIMESTAMP       DEFAULT NOW()
+updated_at                  TIMESTAMP       DEFAULT NOW()
+
+Tabla: audit_log
+Columna                 Tipo                Constraints             Descripción
+id                      SERIAL              PK                      Surrogate key
+workflow_name           VARCHAR(100)        NOT NULL                 Nombre del workflow ejecutado
+execution_id            VARCHAR(100)        NULLABLE                 ID de ejecución n8n
+status                  VARCHAR(20)         NOT NULL                 SUCCESS / FAILED / PARTIAL
+records_processed       INTEGER             NULLABLE                 Cantidad de registros procesados
+error_message           TEXT                NULLABLE                 Mensaje de error si aplica
+execution_time_ms       INTEGER             NULLABLE                 Duración de la ejecución
+executed_at             TIMESTAMP           DEFAULT NOW()            Timestamp de ejecución
+
+2.4 Motor de Priorización — Fórmula de Risk Score
+
+Risk_Score = (0.35 × CVSS_base) + (0.25 × CVSS_temporal) + (0.20 × Exposure_factor)
+           + (0.15 × Criticality_factor) + KEV_bonus
+
+CVSS_temporal          = CVSS_base × Exploit_maturity_multiplier
+Exploit_maturity_multiplier: Unproven/POC=0.90 | Functional=0.95 | High=1.00
+
+Exposure_factor:       Visible en Shodan=10 | No visible=3
+Criticality_factor:    CRITICAL=10 | HIGH=7.5 | MEDIUM=5 | LOW=2.5
+KEV_bonus:             En CISA KEV=+2.0 | No en KEV=0
+
+Risk_Score se cappea en 10.0.
+
+Criticality_tier asignado por Risk_Score:
+  CRITICAL  → score >= 8.5   → SLA 24 horas
+  HIGH      → score 7.0–8.4  → SLA 72 horas
+  MEDIUM    → score 5.0–6.9  → SLA 7 días
+  LOW       → score < 5.0    → SLA 30 días
+
+---
+
+3. Workflows n8n — Especificación por Nodo
+
+3.1 Workflow de Recolección (workflow-collection.json)
+
+Nodo                    Tipo n8n            Configuración clave
+Schedule Trigger        Cron                0 2 * * *  (02:00 UTC daily)
+HTTP Request NVD        HTTP Request        GET https://services.nvd.nist.gov/rest/json/cves/2.0
+                                            Params: pubStartDate, pubEndDate, resultsPerPage=2000
+                                            Header: x-api-key: {{NVD_API_KEY}}
+Function ParseNVD       Function (JS)       Extrae cve_id, description, cvssV3, configurations, references
+                                            Maneja fallback a CVSS v2 si v3 no disponible
+                                            Serializa configurations/references a JSON string
+PostgreSQL Upsert       PostgreSQL          INSERT INTO cves ... ON CONFLICT (cve_id) DO UPDATE
+                                            Actualiza description, last_modified_date, status
+IF Pagination           IF                  totalResults > startIndex + resultsPerPage → paginar
+Audit Log               PostgreSQL          INSERT INTO audit_log con conteo y execution_id
+
+3.2 Workflow de Correlación (workflow-correlation.json)
+
+Nodo                    Tipo n8n            Configuración clave
+HTTP Trigger / Cron     Webhook / Cron      Encadenado desde workflow-collection vía HTTP Request
+Query CVEs              PostgreSQL          SELECT * FROM cves WHERE status='unprocessed' AND DATE(published_date)=TODAY
+Function CPE Match      Function (JS)       Por cada CVE: parsea configurations JSON
+                                            Extrae CPEs del CVE (navega nodos AND/OR/MATCH)
+                                            Compara contra software_inventory usando:
+                                              1. Exact match
+                                              2. Wildcard match (CPE termina en *)
+                                              3. Version range match (semver con versionStartIncluding/versionEndExcluding)
+                                              4. Fallback heurístico (sufijos distribución, 4 componentes, formato fecha)
+                                            Asigna correlation_confidence: HIGH/MEDIUM/LOW
+PostgreSQL Insert       PostgreSQL          INSERT INTO applicable_vulnerabilities (cve_id, software_id, ...)
+                                            ON CONFLICT (cve_id, software_id) DO NOTHING
+Update CVE Status       PostgreSQL          UPDATE cves SET status='correlated' WHERE id=...
+
+3.3 Workflow de Priorización (workflow-prioritization.json)
+
+Nodo                    Tipo n8n            Configuración clave
+Query Applicable        PostgreSQL          SELECT av.*, c.cvss_v3_base_score, si.criticality, si.ip_address
+                                            FROM applicable_vulnerabilities av JOIN cves JOIN software_inventory
+                                            WHERE av.risk_score IS NULL
+HTTP Shodan             HTTP Request        GET https://api.shodan.io/shodan/host/{ip}?key={{SHODAN_API_KEY}}
+                                            Determina exposed = TRUE si IP aparece en Shodan
+HTTP CISA KEV           HTTP Request        GET https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+                                            (cacheado 24h) → verifica si cve_id está en la lista
+Function Risk Score     Function (JS)       Implementa fórmula multifactorial
+                                            Calcula CVSS_temporal con Exploit_maturity_multiplier
+                                            Cappea en 10.0, asigna criticality_tier
+Update App Vuln         PostgreSQL          UPDATE applicable_vulnerabilities SET risk_score, criticality_tier,
+                                            shodan_exposed, kev_listed, exploit_available WHERE id=...
+Update CVE Status       PostgreSQL          UPDATE cves SET status='prioritized'
+
+3.4 Workflow de Alertas (workflow-alerts.json)
+
+Nodo                    Tipo n8n            Configuración clave
+Query Pending Alerts    PostgreSQL          SELECT av.*, c.*, si.* FROM applicable_vulnerabilities av
+                                            JOIN cves c JOIN software_inventory si
+                                            WHERE av.criticality_tier IS NOT NULL
+                                            AND NOT EXISTS (SELECT 1 FROM vulnerability_alerts va WHERE va.applicable_vulnerability_id=av.id)
+                                            ORDER BY av.risk_score DESC
+Function Build Template Function (JS)       Genera HTML email con color-coding por criticality_tier
+                                            Genera Slack Block Kit JSON con emoji por tier
+Send Email              Send Email          SMTP con HTML template, to: security-team@org.com
+HTTP Slack              HTTP Request        POST a SLACK_WEBHOOK_URL con Block Kit payload
+PostgreSQL Insert Alert PostgreSQL          INSERT INTO vulnerability_alerts (applicable_vulnerability_id, alert_type, recipient, ...)
+
+3.5 Workflow de Monitoreo SLA (workflow-monitoring.json)
+
+Nodo                    Tipo n8n            Configuración clave
+Cron SLA Check          Cron                0 * * * *  (cada hora)
+Query Overdue           PostgreSQL          SELECT * FROM applicable_vulnerabilities av
+                                            JOIN vulnerability_alerts va ON av.id=va.applicable_vulnerability_id
+                                            WHERE CURRENT_TIMESTAMP > av.sla_deadline
+                                            AND va.status NOT IN ('remediated','false_positive')
+Function Re-notification Function (JS)      Genera mensaje de re-notificación con tiempo vencido
+HTTP Slack Escalation   HTTP Request        POST a SLACK_WEBHOOK_ESCALATION_URL
+
+---
+
+4. Triggers y Automatizaciones PostgreSQL
+
+Trigger                         Evento                      Acción
+update_cves_updated_at          BEFORE UPDATE ON cves       SET updated_at = NOW()
+update_inventory_updated_at     BEFORE UPDATE ON software_inventory  SET updated_at = NOW()
+update_applicable_updated_at    BEFORE UPDATE ON applicable_vulnerabilities  SET updated_at = NOW()
+update_alerts_updated_at        BEFORE UPDATE ON vulnerability_alerts  SET updated_at = NOW()
+set_sla_deadline                BEFORE INSERT ON applicable_vulnerabilities  Calcula sla_deadline según criticality_tier:
+                                                            CRITICAL → NOW() + 24h
+                                                            HIGH     → NOW() + 72h
+                                                            MEDIUM   → NOW() + 7 days
+                                                            LOW      → NOW() + 30 days
+
+Vistas SQL disponibles:
+v_applicable_vulnerabilities_full   JOIN completo cves + software_inventory + applicable_vulnerabilities, ORDER BY risk_score DESC
+v_sla_compliance_metrics            Agrupado por criticality_tier con within_sla, exceeded_sla, overdue, compliance_pct
+
+---
+
+5. Variables de Entorno (.env)
+
+Variable                    Descripción                                 Ejemplo
+NVD_API_KEY                 API Key de NVD NIST                         xxxx-xxxx-xxxx
+SHODAN_API_KEY              API Key de Shodan                           xxxxxxxxxxxx
+POSTGRES_HOST               Host de PostgreSQL                          postgres
+POSTGRES_PORT               Puerto de PostgreSQL                        5432
+POSTGRES_DB                 Nombre de la base de datos                  vulnerability_mgmt
+POSTGRES_USER               Usuario de PostgreSQL                       n8n_user
+POSTGRES_PASSWORD           Password de PostgreSQL                      [secreto]
+N8N_HOST                    Host público de n8n                         localhost
+N8N_PORT                    Puerto de n8n                               5678
+N8N_BASIC_AUTH_USER         Usuario de autenticación n8n                admin
+N8N_BASIC_AUTH_PASSWORD     Password de autenticación n8n               [secreto]
+SMTP_HOST                   Host SMTP para envío de emails              smtp.gmail.com
+SMTP_PORT                   Puerto SMTP                                 587
+SMTP_USER                   Usuario SMTP                                alerts@org.com
+SMTP_PASSWORD               Password SMTP                               [secreto]
+SECURITY_TEAM_EMAIL         Email del equipo de seguridad               security@org.com
+SLACK_WEBHOOK_URL           Webhook URL del canal #security-alerts      https://hooks.slack.com/...
+SLACK_WEBHOOK_ESCALATION    Webhook URL del canal de escalación         https://hooks.slack.com/...
+CISA_KEV_CACHE_TTL_HOURS    TTL de cache del catálogo CISA KEV          24
+
+---
+
+6. Patrones Aplicados en el Proyecto
+
+Patrón                      Capa                Descripción
+Pipeline Pattern            Orquestación        5 etapas secuenciales e independientes orquestadas en n8n
+Idempotent Processing       Colección/BD        INSERT ON CONFLICT DO UPDATE previene duplicados en cves
+Upsert Pattern              BD                  Actualización segura en re-ejecuciones del workflow
+Audit Trail                 BD                  audit_log registra toda ejecución: timestamp, status, count
+SLA State Machine           BD/Alertas          vulnerability_alerts transiciona: notified→acknowledged→in_progress→remediated
+Multifactorial Scoring      Priorización        5 factores ponderados con pesos configurables
+Caching                     Priorización        CISA KEV cacheado 24h para evitar requests redundantes
+Heuristic Fallback          Correlación         CPE matching degradado con confidence=MEDIUM/LOW para versiones no-semver
+Separation of Concerns      Workflows           Cada workflow tiene responsabilidad única e interfaces definidas
+Infrastructure as Code      Docker              docker-compose.yml + .env.example definen entorno reproducible
+
+---
+
+7. Métricas de Evaluación (SecOps KPIs)
+
+Métrica             Definición                                          Fórmula SQL clave                       Target
+MTTD                Tiempo desde publicación CVE hasta correlación      AVG(av.created_at - c.published_date)   < 4 horas
+MTTR Critical       Tiempo desde notificación hasta remediación         AVG(remediation_completed_at - sent_at) < 24 horas
+Tasa Correlación    % CVEs con activo afectado identificado             CVEs correlacionados / Total aplicables  > 95%
+SLA Compliance      % remediados dentro de SLA objetivo                 Remediados en SLA / Total remediados    > 85%
+Falsos Positivos    % alertas marcadas como no aplicables               false_positive / Total alertas          < 5%
+Cobertura Inventario % activos con CPE preciso en inventario            Activos con CPE / Total activos         > 90%
+
+---
+
+8. Checklist de Entrega
+
+CE-01   Repositorio Git con historial de commits progresivo (no single commit)
+CE-02   README.md con instrucciones de setup funcionando en máquina limpia
+CE-03   .env.example completo con todas las variables documentadas con valores de ejemplo
+CE-04   docker-compose.yml ejecutable: docker-compose up -d levanta n8n + PostgreSQL + Redis sin errores
+CE-05   db/schema.sql ejecutable: crea las 5 tablas, triggers, índices y vistas sin errores en PostgreSQL limpio
+CE-06   db/seed.sql: carga datos de ejemplo en software_inventory (mínimo 10 activos CPE representativos)
+CE-07   Workflows n8n exportados como JSON en workflows/ e importables desde n8n UI
+CE-08   Workflow de recolección ejecutable manualmente desde n8n UI sin errores
+CE-09   Workflow de correlación produce registros en applicable_vulnerabilities para CVEs del seed
+CE-10   Motor de priorización calcula risk_score y criticality_tier correctamente según fórmula
+CE-11   Alert workflow envía al menos un email/Slack de prueba en entorno sandbox
+CE-12   Trigger SLA deadline calculado automáticamente en INSERT a applicable_vulnerabilities
+CE-13   Vista v_applicable_vulnerabilities_full retorna datos joinados correctamente
+CE-14   Vista v_sla_compliance_metrics retorna métricas por criticality_tier
+CE-15   Workflow de monitoreo SLA detecta overdue y re-notifica
+CE-16   audit_log registra cada ejecución de workflow con status y records_processed
+CE-17   .env nunca commiteado al repositorio (debe estar en .gitignore)
+
+Bonus +10 pts: Queries SQL del Anexo E retornan métricas correctas sobre datos reales de NVD
+Bonus +10 pts: Dashboard Grafana o script Python que visualice MTTD, MTTR, SLA compliance
+⚠ Penalización -30%: El sistema no levanta siguiendo exclusivamente el README.
+
+---
+
+Apéndice — Referencias Técnicas
+
+Tecnología              URL
+n8n Documentation       https://docs.n8n.io/
+NVD API 2.0             https://nvd.nist.gov/developers/vulnerabilities
+Shodan API              https://developer.shodan.io/
+CISA KEV Catalog        https://www.cisa.gov/known-exploited-vulnerabilities-catalog
+PostgreSQL 16           https://www.postgresql.org/docs/16/
+Docker Compose          https://docs.docker.com/compose/
+CPE Specification 2.3   https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir7695.pdf
+CVSS v3.1 Spec          https://www.first.org/cvss/v3.1/specification-document
+semver.org              https://semver.org/
+
+
+— Fin de la Especificación Técnica · VulnPatchNotifier v1.0 — SDD · Pipeline-First —

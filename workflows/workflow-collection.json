@@ -1,0 +1,357 @@
+{
+  "name": "workflow-collection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "c9d4e5f6-a1b2-4c3d-8e9f-0a1b2c3d4e5f",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1b2c3d4-0001",
+              "name": "pubStartDate",
+              "value": "={{ new Date(Date.now() - 86400000).toISOString().slice(0, 23) }}",
+              "type": "string"
+            },
+            {
+              "id": "b2c3d4e5-0002",
+              "name": "pubEndDate",
+              "value": "={{ new Date().toISOString().slice(0, 23) }}",
+              "type": "string"
+            },
+            {
+              "id": "c3d4e5f6-0003",
+              "name": "executionStart",
+              "value": "={{ Date.now() }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d0e1f2a3-b4c5-4d6e-9f0a-1b2c3d4e5f60",
+      "name": "Set Date Window",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apiKey",
+              "value": "={{ $env.NVD_API_KEY }}"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "pubStartDate",
+              "value": "={{ $json.pubStartDate }}"
+            },
+            {
+              "name": "pubEndDate",
+              "value": "={{ $json.pubEndDate }}"
+            },
+            {
+              "name": "resultsPerPage",
+              "value": "2000"
+            },
+            {
+              "name": "startIndex",
+              "value": "0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "e1f2a3b4-c5d6-4e7f-a0b1-2c3d4e5f6a71",
+      "name": "HTTP Request NVD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const items = $input.all();\nconst response = items[0].json;\nconst vulnerabilities = response.vulnerabilities || [];\nconst totalResults = response.totalResults || 0;\nconst resultsPerPage = response.resultsPerPage || 2000;\nconst startIndex = response.startIndex || 0;\nconst executionStart = Date.now();\n\nif (vulnerabilities.length === 0) {\n  return [{\n    json: {\n      _isEmpty: true,\n      totalResults: 0,\n      parsedCount: 0,\n      needsPagination: false,\n      executionStart\n    }\n  }];\n}\n\nreturn vulnerabilities.map(item => {\n  const cve = item.cve;\n\n  // Description — prefer English\n  const descriptions = cve.descriptions || [];\n  const enDesc = descriptions.find(d => d.lang === 'en');\n  const rawDesc = enDesc ? enDesc.value : (descriptions[0] ? descriptions[0].value : '');\n  const description = rawDesc.replace(/'/g, \"''\").replace(/\\$/g, \"'||chr(36)||'\");\n\n  // CVSS: prefer v3.1 → v3.0 → v2 fallback\n  const metrics = cve.metrics || {};\n  const cvssV3data = ((metrics.cvssMetricV31 || []).length\n    ? metrics.cvssMetricV31\n    : (metrics.cvssMetricV30 || []))[0];\n  const cvssV2data = (metrics.cvssMetricV2 || [])[0];\n  const cvssV3 = cvssV3data ? cvssV3data.cvssData : null;\n  const cvssV2 = cvssV2data ? cvssV2data.cvssData : null;\n\n  // CWE — skip NVD internal placeholders\n  let cweId = null;\n  const weakness = (cve.weaknesses || [])[0];\n  if (weakness && weakness.description && weakness.description[0]) {\n    const val = weakness.description[0].value;\n    if (val && !val.startsWith('NVD-CWE')) {\n      cweId = val;\n    }\n  }\n\n  // Configurations → JSONB string (null when absent)\n  const configurationsRaw = (cve.configurations || []).length\n    ? JSON.stringify(cve.configurations)\n    : null;\n  const configurations = configurationsRaw\n    ? configurationsRaw.replace(/\\$/g, \"'||chr(36)||'\")\n    : null;\n\n  // References → JSONB string stored as patch_references\n  const refs = (cve.references || []).map(r => ({\n    url: r.url,\n    source: r.source || null,\n    tags: r.tags || []\n  }));\n  const refsRaw = refs.length ? JSON.stringify(refs) : null;\n  const patch_references = refsRaw\n    ? refsRaw.replace(/\\$/g, \"'||chr(36)||'\")\n    : null;\n\n  return {\n    json: {\n      cve_id:             cve.id,\n      description,\n      cvss_v3_base_score: cvssV3 ? cvssV3.baseScore    : null,\n      cvss_v3_vector:     cvssV3 ? cvssV3.vectorString  : null,\n      cvss_v3_severity:   cvssV3 ? cvssV3.baseSeverity  : null,\n      cvss_v2_base_score: cvssV2 ? cvssV2.baseScore    : null,\n      cwe_id:             cweId,\n      published_date:     cve.published,\n      last_modified_date: cve.lastModified || null,\n      configurations,\n      patch_references,\n      _meta: {\n        totalResults,\n        parsedCount:     vulnerabilities.length,\n        needsPagination: totalResults > startIndex + resultsPerPage,\n        executionStart\n      }\n    }\n  };\n});"
+      },
+      "id": "f2a3b4c5-d6e7-4f80-b1c2-3d4e5f6a7b82",
+      "name": "Parse NVD Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-cve-id-exists",
+              "leftValue": "={{ $json.cve_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a3b4c5d6-e7f8-4091-c2d3-4e5f6a7b8c93",
+      "name": "IF Has CVEs",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.cves\n  (cve_id, description, cvss_v3_base_score, cvss_v3_vector, cvss_v3_severity,\n   cvss_v2_base_score, cwe_id, published_date, last_modified_date,\n   configurations, patch_references)\nVALUES (\n  '{{ $json.cve_id }}',\n  NULLIF(NULLIF('{{ $json.description }}', ''), 'null'),\n  NULLIF(NULLIF('{{ $json.cvss_v3_base_score }}', ''), 'null')::numeric,\n  NULLIF(NULLIF('{{ $json.cvss_v3_vector }}', ''), 'null'),\n  NULLIF(NULLIF('{{ $json.cvss_v3_severity }}', ''), 'null'),\n  NULLIF(NULLIF('{{ $json.cvss_v2_base_score }}', ''), 'null')::numeric,\n  NULLIF(NULLIF('{{ $json.cwe_id }}', ''), 'null'),\n  NULLIF(NULLIF('{{ $json.published_date }}', ''), 'null')::timestamp,\n  NULLIF(NULLIF('{{ $json.last_modified_date }}', ''), 'null')::timestamp,\n  NULLIF(NULLIF('{{ $json.configurations }}', ''), 'null')::jsonb,\n  NULLIF(NULLIF('{{ $json.patch_references }}', ''), 'null')::jsonb\n)\nON CONFLICT (cve_id) DO UPDATE SET\n  description          = EXCLUDED.description,\n  cvss_v3_base_score   = EXCLUDED.cvss_v3_base_score,\n  cvss_v3_vector       = EXCLUDED.cvss_v3_vector,\n  cvss_v3_severity     = EXCLUDED.cvss_v3_severity,\n  cvss_v2_base_score   = EXCLUDED.cvss_v2_base_score,\n  cwe_id               = EXCLUDED.cwe_id,\n  last_modified_date   = EXCLUDED.last_modified_date,\n  configurations       = EXCLUDED.configurations,\n  patch_references     = EXCLUDED.patch_references,\n  updated_at           = NOW()\nWHERE vulnerability_management.cves.status = 'unprocessed'",
+        "options": {
+          "queryBatching": "independently"
+        }
+      },
+      "id": "b4c5d6e7-f8a9-4102-d3e4-5f6a7b8c9d04",
+      "name": "Postgres Upsert CVEs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        180
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const upserted = $input.all();\nconst parseFirst = $('Parse NVD Response').first();\nconst meta = (parseFirst && parseFirst.json._meta) ? parseFirst.json._meta : {};\nconst executionTimeMs = Date.now() - (meta.executionStart || Date.now());\nconst needsPagination = meta.needsPagination || false;\n\nreturn [{\n  json: {\n    recordsProcessed: upserted.length,\n    totalResults:     meta.totalResults || upserted.length,\n    needsPagination,\n    executionTimeMs,\n    auditStatus: needsPagination ? 'PARTIAL' : 'SUCCESS',\n    errorMessage: needsPagination\n      ? 'Only ' + upserted.length + ' of ' + meta.totalResults + ' CVEs fetched (NVD window > 2000). Implement loop pagination.'\n      : null\n  }\n}];"
+      },
+      "id": "c5d6e7f8-a9b0-4213-e4f5-6a7b8c9d0e15",
+      "name": "Aggregate Stats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, execution_time_ms, executed_at)\nVALUES ('workflow-collection', '{{ $execution.id }}', '{{ $json.auditStatus }}', {{ $json.recordsProcessed }}, NULLIF(NULLIF('{{ $json.errorMessage }}', ''), 'null'), {{ $json.executionTimeMs }}, NOW())",
+        "options": {}
+      },
+      "id": "e7f8a9b0-c1d2-4435-a6b7-8c9d0e1f2a37",
+      "name": "Postgres Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        180
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, execution_time_ms, executed_at)\nVALUES ('workflow-collection', '{{ $execution.id }}', 'SUCCESS', 0, 'No CVEs published in the last 24h window.', {{ Date.now() - ($json.executionStart || Date.now()) }}, NOW())",
+        "options": {}
+      },
+      "id": "a9b0c1d2-e3f4-4657-c8d9-0e1f2a3b4c59",
+      "name": "Postgres Audit Empty",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "FRusji7kY5XCUBWW",
+          "name": "VulnPatchNotifier Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## workflow-collection\n\n**Trigger:** Daily 02:00 UTC\n**Writes to:** `cves`, `audit_log`\n\n### Flow\n1. Compute 24h date window (pubStartDate / pubEndDate)\n2. GET NVD API 2.0 — up to 2000 CVEs per run\n3. Parse: CVSS v3.1 → v3.0 → v2 fallback, CWE, CPE configs, references\n4. **Upsert** into `cves` — idempotent via `ON CONFLICT (cve_id)`\n   - Does NOT reset `status` on conflict (correlated/prioritized rows are preserved)\n5. Audit log: SUCCESS (all fetched) or PARTIAL (>2000 results — pagination needed)\n\n### Prerequisites\nCreate a Postgres credential in n8n named **VulnPatchNotifier Postgres** with:\n- Host: `postgres` (Docker service name)\n- Port: `5432`\n- DB: `vulnerability_mgmt`\n- User / Password: from `.env`\n- Schema: `vulnerability_management`\n\n### Environment\n`NVD_API_KEY` must be set in the n8n container environment (via `docker-compose.yml`).",
+        "height": 380,
+        "width": 460
+      },
+      "id": "sticky-collection-doc",
+      "name": "Documentation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -160
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Date Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Date Window": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request NVD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request NVD": {
+      "main": [
+        [
+          {
+            "node": "Parse NVD Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse NVD Response": {
+      "main": [
+        [
+          {
+            "node": "IF Has CVEs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has CVEs": {
+      "main": [
+        [
+          {
+            "node": "Postgres Upsert CVEs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres Audit Empty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Upsert CVEs": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Stats": {
+      "main": [
+        [
+          {
+            "node": "Postgres Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "versionId": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  },
+  "id": "collection-v1",
+  "tags": []
+}
