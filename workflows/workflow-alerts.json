@@ -5,53 +5,50 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "alerts-trigger",
-        "responseMode": "onReceived",
-        "responseData": "noData",
         "options": {}
       },
-      "id": "a1b1c1d1-e1f1-4111-a111-b1c1d1e1f101",
-      "name": "Webhook Trigger",
+      "id": "eb998388-1807-4d04-921f-966b3c66c797",
+      "name": "Webhook Trigger1",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [
-        0,
-        300
+        -32,
+        1440
       ],
       "webhookId": "alerts-trigger-v1"
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SET search_path TO vulnerability_management;\nSELECT\n  av.id               AS av_id,\n  av.risk_score,\n  av.criticality_tier,\n  av.sla_deadline,\n  av.kev_listed,\n  av.shodan_exposed,\n  c.cve_id            AS cve_id_str,\n  c.description       AS cve_description,\n  c.cvss_v3_base_score,\n  c.cvss_v3_severity,\n  c.published_date,\n  si.asset_name,\n  si.owner_team,\n  si.criticality      AS asset_criticality\nFROM vulnerability_management.applicable_vulnerabilities av\nJOIN vulnerability_management.cves c             ON c.id  = av.cve_id\nJOIN vulnerability_management.software_inventory si ON si.id = av.software_id\nWHERE av.criticality_tier IS NOT NULL\n  AND NOT EXISTS (\n    SELECT 1\n    FROM vulnerability_management.vulnerability_alerts va\n    WHERE va.applicable_vulnerability_id = av.id\n  )\nORDER BY av.risk_score DESC NULLS LAST",
+        "query": "\nSELECT\n  av.id               AS av_id,\n  av.risk_score,\n  av.criticality_tier,\n  av.sla_deadline,\n  av.kev_listed,\n  av.shodan_exposed,\n  c.cve_id            AS cve_id_str,\n  c.description       AS cve_description,\n  c.cvss_v3_base_score,\n  c.cvss_v3_severity,\n  c.published_date,\n  si.asset_name,\n  si.owner_team,\n  si.criticality      AS asset_criticality\nFROM vulnerability_management.applicable_vulnerabilities av\nJOIN vulnerability_management.cves c             ON c.id  = av.cve_id\nJOIN vulnerability_management.software_inventory si ON si.id = av.software_id\nWHERE av.criticality_tier IS NOT NULL\n  AND NOT EXISTS (\n    SELECT 1\n    FROM vulnerability_management.vulnerability_alerts va\n    WHERE va.applicable_vulnerability_id = av.id\n  )\nORDER BY av.risk_score DESC NULLS LAST",
         "options": {}
       },
-      "id": "a2b2c2d2-e2f2-4222-a222-b2c2d2e2f202",
-      "name": "Postgres Query Pending Alerts",
+      "id": "99a6c45f-8ba5-40d9-8ff6-69d138f2d62c",
+      "name": "Postgres Query Pending Alerts1",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        220,
-        300
+        192,
+        1440
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
         "jsCode": "const items = $input.all();\nconst secEmail = 'security@company.com';\n\nconst colorMap = { CRITICAL: '#ff0000', HIGH: '#ff8800', MEDIUM: '#ffdd00', LOW: '#0088ff' };\nconst slaMap   = { CRITICAL: '24 hours', HIGH: '72 hours', MEDIUM: '7 days', LOW: '30 days' };\n\nreturn items.map(item => {\n  const av      = item.json;\n  const tier    = av.criticality_tier || 'LOW';\n  const color   = colorMap[tier] || '#0088ff';\n  const sla     = slaMap[tier]   || '30 days';\n  const score   = av.risk_score         != null ? String(av.risk_score)         : 'N/A';\n  const cvss    = av.cvss_v3_base_score != null ? String(av.cvss_v3_base_score) : 'N/A';\n  const now     = new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC';\n  const cveId   = av.cve_id_str  || '';\n  const asset   = av.asset_name  || 'Unknown';\n  const team    = av.owner_team  || 'N/A';\n  const pubDate = av.published_date ? String(av.published_date).slice(0, 10) : 'N/A';\n  const rawDesc = av.cve_description || 'No description available.';\n  const desc    = rawDesc.length > 280 ? rawDesc.slice(0, 277) + '...' : rawDesc;\n  const nvdUrl  = 'https://nvd.nist.gov/vuln/detail/' + cveId;\n  const subject = '[' + tier + '] ' + cveId + ' on ' + asset;\n\n  // ── HTML email (color-coded per spec) ──────────────────────────────────────\n  const css = 'body{font-family:Arial,sans-serif;margin:0;padding:0;background:#f4f4f4}'\n    + '.wrap{max-width:600px;margin:20px auto;background:#fff;border-radius:6px;overflow:hidden;border:1px solid #ddd}'\n    + '.top{background:' + color + ';padding:18px 24px;color:#fff;font-size:20px;font-weight:bold}'\n    + '.body{padding:24px}table{width:100%;border-collapse:collapse}'\n    + 'td{padding:8px 0;vertical-align:top;font-size:14px;color:#333;border-bottom:1px solid #f0f0f0}'\n    + 'td:first-child{font-weight:bold;color:#666;width:140px;font-size:12px;text-transform:uppercase}'\n    + '.btn{display:inline-block;margin-top:16px;padding:10px 20px;background:#0066cc;color:#fff;text-decoration:none;border-radius:4px;font-size:14px}'\n    + '.foot{padding:12px 24px;background:#f9f9f9;font-size:11px;color:#aaa;border-top:1px solid #eee}';\n\n  const emailHtml = '<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>' + css + '</style></head>'\n    + '<body><div class=\"wrap\">'\n    + '<div class=\"top\">' + tier + ' Security Alert</div>'\n    + '<div class=\"body\"><table>'\n    + '<tr><td>CVE ID</td><td>' + cveId + '</td></tr>'\n    + '<tr><td>Risk Score</td><td><strong>' + score + ' / 10</strong></td></tr>'\n    + '<tr><td>Affected Asset</td><td>' + asset + '</td></tr>'\n    + '<tr><td>Owner Team</td><td>' + team + '</td></tr>'\n    + '<tr><td>CVSS v3 Base</td><td>' + cvss + '</td></tr>'\n    + '<tr><td>Published</td><td>' + pubDate + '</td></tr>'\n    + '<tr><td>Description</td><td>' + desc + '</td></tr>'\n    + '<tr><td>SLA</td><td>Remediate within <strong>' + sla + '</strong></td></tr>'\n    + '</table>'\n    + '<a href=\"' + nvdUrl + '\" class=\"btn\">View on NVD &rarr;</a>'\n    + '</div>'\n    + '<div class=\"foot\">VulnPatchNotifier &middot; UTN FRM &middot; ' + now + '</div>'\n    + '</div></body></html>';\n\n  // ── Slack Block Kit payload ─────────────────────────────────────────────────\n  const slackPayload = JSON.stringify({\n    blocks: [\n      {\n        type: 'header',\n        text: { type: 'plain_text', text: tier + ' Alert: ' + cveId, emoji: true }\n      },\n      {\n        type: 'section',\n        fields: [\n          { type: 'mrkdwn', text: '*CVE:* ' + cveId },\n          { type: 'mrkdwn', text: '*Risk Score:* ' + score + ' / 10' },\n          { type: 'mrkdwn', text: '*Asset:* ' + asset },\n          { type: 'mrkdwn', text: '*Owner:* ' + team }\n        ]\n      },\n      {\n        type: 'section',\n        text: { type: 'mrkdwn', text: '*Description:* ' + desc }\n      },\n      {\n        type: 'actions',\n        elements: [\n          {\n            type: 'button',\n            text: { type: 'plain_text', text: 'View on NVD', emoji: false },\n            url: nvdUrl,\n            style: 'primary'\n          }\n        ]\n      },\n      {\n        type: 'context',\n        elements: [\n          { type: 'mrkdwn', text: 'SLA: *' + sla + '* | CVSS: ' + cvss + ' | VulnPatchNotifier' }\n        ]\n      }\n    ]\n  });\n\n  return {\n    json: {\n      av_id:            av.av_id,\n      cve_id_str:       cveId,\n      risk_score:       av.risk_score,\n      criticality_tier: tier,\n      asset_name:       asset,\n      owner_team:       team,\n      recipient_email:  secEmail,\n      subject,\n      emailHtml,\n      slackPayload,\n      color\n    }\n  };\n});"
       },
-      "id": "a3b3c3d3-e3f3-4333-a333-b3c3d3e3f303",
-      "name": "Code Build Template",
+      "id": "b8dac856-58d9-4071-bb57-aac7c803d588",
+      "name": "Code Build Template1",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        440,
-        300
+        416,
+        1440
       ]
     },
     {
@@ -59,22 +56,22 @@
         "fromEmail": "e4cd6c2b41ed07@sandbox.smtp.mailtrap.io",
         "toEmail": "={{ $json.recipient_email }}",
         "subject": "={{ $json.subject }}",
-        "emailType": "html",
         "html": "={{ $json.emailHtml }}",
         "options": {}
       },
-      "id": "a4b4c4d4-e4f4-4444-a444-b4c4d4e4f404",
-      "name": "Send Email",
+      "id": "9d3716d0-1867-4924-9687-7aa6e1e81900",
+      "name": "Send Email1",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        660,
-        160
+        640,
+        1296
       ],
+      "webhookId": "8dec28d0-063f-4939-b410-d37947b36adb",
       "credentials": {
         "smtp": {
-          "id": "3iVBfePeQRWyX70T",
-          "name": "VulnPatchNotifier SMTP"
+          "id": "F9sKjRFG4kI6cBwA",
+          "name": "SMTP account"
         }
       },
       "continueOnFail": true
@@ -91,74 +88,73 @@
           "timeout": 10000
         }
       },
-      "id": "a5b5c5d5-e5f5-4555-a555-b5c5d5e5f505",
-      "name": "HTTP Slack",
+      "id": "e49128c8-4502-4977-a807-bbb32216a02d",
+      "name": "HTTP Slack1",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        660,
-        460
+        640,
+        1600
       ],
       "continueOnFail": true
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.vulnerability_alerts\n  (applicable_vulnerability_id, alert_type, recipient, subject, message_body, sent_at)\nVALUES ({{ $json.av_id }}, 'EMAIL', '{{ $json.recipient_email }}', '{{ $json.subject }}', $EMLBODY${{ $json.emailHtml }}$EMLBODY$, NOW())",
+        "query": "\nINSERT INTO vulnerability_management.vulnerability_alerts\n  (applicable_vulnerability_id, alert_type, recipient, subject, message_body, sent_at)\nVALUES ({{ $json.av_id }}, 'EMAIL', '{{ $json.recipient_email }}', '{{ $json.subject }}', $EMLBODY${{ $json.emailHtml }}$EMLBODY$, NOW())",
         "options": {
           "queryBatching": "independently"
         }
       },
-      "id": "a6b6c6d6-e6f6-4666-a666-b6c6d6e6f606",
-      "name": "Postgres Insert Email Alert",
+      "id": "0efb8d84-fccd-48eb-97bf-196eaceaa6f2",
+      "name": "Postgres Insert Email Alert1",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        880,
-        160
+        848,
+        1296
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.vulnerability_alerts\n  (applicable_vulnerability_id, alert_type, recipient, subject, message_body, sent_at)\nVALUES ({{ $json.av_id }}, 'SLACK', 'slack-webhook', '{{ $json.subject }}', $EMLBODY${{ $json.slackPayload }}$EMLBODY$, NOW())",
+        "query": "\nINSERT INTO vulnerability_management.vulnerability_alerts\n  (applicable_vulnerability_id, alert_type, recipient, subject, message_body, sent_at)\nVALUES ({{ $json.av_id }}, 'SLACK', 'slack-webhook', '{{ $json.subject }}', $EMLBODY${{ $json.slackPayload }}$EMLBODY$, NOW())",
         "options": {
           "queryBatching": "independently"
         }
       },
-      "id": "a7b7c7d7-e7f7-4777-a777-b7c7d7e7f707",
-      "name": "Postgres Insert Slack Alert",
+      "id": "2d8d1b54-472b-4c94-9326-9682a156f9b0",
+      "name": "Postgres Insert Slack Alert1",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        880,
-        460
+        848,
+        1600
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const emailInserts = $input.all();\nconst templates = $('Code Build Template').all();\nreturn [{\n  json: {\n    recordsProcessed: templates.length,\n    emailAlertsSent:  emailInserts.length\n  }\n}];"
+        "jsCode": "const emailInserts = $input.all();\nconst templates = $('Code Build Template1').all();\nreturn [{\n  json: {\n    recordsProcessed: templates.length,\n    emailAlertsSent:  emailInserts.length\n  }\n}];"
       },
-      "id": "a8b8c8d8-e8f8-4888-a888-b8c8d8e8f808",
-      "name": "Code Stats",
+      "id": "60e8c82d-73f7-4023-b410-4c583c4af471",
+      "name": "Code Stats1",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1100,
-        160
+        1072,
+        1296
       ]
     },
     {
@@ -167,18 +163,18 @@
         "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, executed_at)\nVALUES ('workflow-alerts', '{{ $execution.id }}', 'SUCCESS', {{ $json.recordsProcessed }}, NOW())",
         "options": {}
       },
-      "id": "a9b9c9d9-e9f9-4999-a999-b9c9d9e9f909",
-      "name": "Postgres Audit Log",
+      "id": "fda2a5c3-ee96-46fc-babf-44b6dc341f65",
+      "name": "Postgres Audit Log1",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1320,
-        160
+        1296,
+        1296
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
@@ -188,92 +184,82 @@
         "height": 440,
         "width": 500
       },
-      "id": "sticky-alerts-doc",
-      "name": "Documentation",
+      "id": "4ee37364-0651-42aa-8ef9-9f2d12c13ca8",
+      "name": "Documentation1",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        0,
-        -220
+        -32,
+        912
       ]
     }
   ],
   "pinData": {},
   "connections": {
-    "Webhook Trigger": {
+    "Webhook Trigger1": {
       "main": [
         [
           {
-            "node": "Postgres Query Pending Alerts",
+            "node": "Postgres Query Pending Alerts1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Postgres Query Pending Alerts": {
+    "Postgres Query Pending Alerts1": {
       "main": [
         [
           {
-            "node": "Code Build Template",
+            "node": "Code Build Template1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Code Build Template": {
+    "Code Build Template1": {
       "main": [
         [
           {
-            "node": "Send Email",
+            "node": "Send Email1",
             "type": "main",
             "index": 0
           },
           {
-            "node": "HTTP Slack",
+            "node": "HTTP Slack1",
             "type": "main",
             "index": 0
           },
           {
-            "node": "Postgres Insert Email Alert",
+            "node": "Postgres Insert Email Alert1",
             "type": "main",
             "index": 0
           },
           {
-            "node": "Postgres Insert Slack Alert",
+            "node": "Postgres Insert Slack Alert1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Send Email": {
-      "main": [
-        []
-      ]
-    },
-    "HTTP Slack": {
-      "main": [
-        []
-      ]
-    },
-    "Postgres Insert Email Alert": {
+    "Postgres Insert Email Alert1": {
       "main": [
         [
           {
-            "node": "Code Stats",
+            "node": "Code Stats1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Code Stats": {
+    "Code Stats1": {
       "main": [
         [
           {
-            "node": "Postgres Audit Log",
+            "node": "Postgres Audit Log1",
             "type": "main",
             "index": 0
           }
@@ -281,18 +267,16 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1",
-    "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "binaryMode": "separate"
   },
-  "versionId": "4d5e6f7a-8b9c-0123-def0-123456789003",
+  "versionId": "cae75319-a9a6-4170-8f6c-f41c6a6b2844",
   "meta": {
     "templateCredsSetupCompleted": true,
-    "instanceId": ""
+    "instanceId": "37824f2512ad3f3e84093cd40d3306dc41ad731f1d52c76d10afeb027e69edfe"
   },
-  "id": "alerts-v1",
+  "id": "t6nVwy0lEEEgltez",
   "tags": []
 }

@@ -1,2 +1,31 @@
+# ─── Environment & Secrets ───────────────────────────────────────────────────
 .env
+*.env.local
+
+# ─── Node / Frontend ─────────────────────────────────────────────────────────
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+
+# ─── Python / Backend ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+dashboard/backend/__pycache__/
+
+# ─── Database Backups ────────────────────────────────────────────────────────
+backup_db.sql
+db/backup_pre_reset_*.sql
+
+# ─── Claude Code ─────────────────────────────────────────────────────────────
 .claude/settings.local.json
+
+# ─── Scripts temporales ──────────────────────────────────────────────────────
+fix-credential-ids.ps1
+fix-credential-ids.sh
+get-docker.sh
+insert_cve_test.sql
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

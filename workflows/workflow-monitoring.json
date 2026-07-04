@@ -12,11 +12,14 @@
           ]
         }
       },
-      "id": "aa11bb22-cc33-4dd4-ee55-ff6677889900",
+      "id": "96308f27-a409-4e60-8396-7a866c59bf67",
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 300]
+      "position": [
+        416,
+        704
+      ]
     },
     {
       "parameters": {
@@ -24,28 +27,33 @@
         "query": "SET search_path TO vulnerability_management;\nSELECT\n  av.id                    AS av_id,\n  av.criticality_tier,\n  av.risk_score,\n  av.sla_deadline,\n  c.cve_id                 AS cve_id_str,\n  c.cvss_v3_base_score,\n  si.asset_name            AS asset_name,\n  si.criticality           AS asset_criticality,\n  va.id                    AS alert_id,\n  va.status                AS alert_status,\n  va.sent_at\nFROM vulnerability_management.applicable_vulnerabilities av\nJOIN vulnerability_management.cves c                  ON c.id  = av.cve_id\nJOIN vulnerability_management.software_inventory si   ON si.id = av.software_id\nJOIN vulnerability_management.vulnerability_alerts va ON va.applicable_vulnerability_id = av.id\nWHERE av.sla_deadline IS NOT NULL\n  AND CURRENT_TIMESTAMP > av.sla_deadline\n  AND va.status NOT IN ('remediated', 'false_positive')\nORDER BY av.risk_score DESC NULLS LAST, av.sla_deadline ASC",
         "options": {}
       },
-      "id": "bb22cc33-dd44-4ee5-ff66-778899001122",
+      "id": "62e184e3-f7b1-4044-993c-e02247a4079b",
       "name": "Postgres Query SLA Overdue",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [220, 300],
+      "position": [
+        640,
+        704
+      ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
         "jsCode": "const items = $input.all();\n\nif (!items.length) {\n  return [{ json: { _isEmpty: true, overdueCount: 0 } }];\n}\n\nconst nowMs = Date.now();\n\nconst lines = items.map(item => {\n  const av = item.json;\n  const deadlineMs = new Date(av.sla_deadline).getTime();\n  const hoursOverdue = Math.max(1, Math.round((nowMs - deadlineMs) / 3600000));\n  const overdueStr = hoursOverdue >= 48\n    ? Math.floor(hoursOverdue / 24) + 'd ' + (hoursOverdue % 24) + 'h'\n    : hoursOverdue + 'h';\n  return '\\u2022 *' + av.cve_id_str + '* \\u2014 ' + av.asset_name\n    + ' | ' + av.criticality_tier\n    + ' | Score: ' + av.risk_score\n    + ' | Overdue: ' + overdueStr\n    + ' | Status: ' + av.alert_status;\n}).join('\\n');\n\nconst header = items.length === 1\n  ? '\\u26a0\\ufe0f SLA Breach \\u2014 1 overdue vulnerability'\n  : '\\u26a0\\ufe0f SLA Breach \\u2014 ' + items.length + ' overdue vulnerabilities';\n\nconst bodyText = lines.length <= 2990\n  ? lines\n  : lines.slice(0, 2990) + '\\n_\\u2026truncated_';\n\nconst slackPayload = JSON.stringify({\n  blocks: [\n    {\n      type: 'header',\n      text: { type: 'plain_text', text: header, emoji: true }\n    },\n    {\n      type: 'section',\n      text: { type: 'mrkdwn', text: bodyText }\n    },\n    {\n      type: 'context',\n      elements: [\n        {\n          type: 'mrkdwn',\n          text: 'VulnPatchNotifier Monitoring | ' + new Date().toISOString().slice(0, 19) + ' UTC'\n        }\n      ]\n    }\n  ]\n});\n\nreturn [{ json: { slackPayload, overdueCount: items.length, _isEmpty: false } }];"
       },
-      "id": "cc33dd44-ee55-4ff6-0077-889900112233",
+      "id": "7ed6fc21-6dbf-4b96-b599-3a5959fcbcdd",
       "name": "Code Prepare Escalation",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [440, 300]
+      "position": [
+        864,
+        704
+      ]
     },
     {
       "parameters": {
@@ -53,7 +61,8 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "strict",
+            "version": 1
           },
           "conditions": [
             {
@@ -70,17 +79,19 @@
         },
         "options": {}
       },
-      "id": "dd44ee55-ff66-4007-1188-990011223344",
+      "id": "36e9dccd-7ba6-44f5-802a-f7145d7507cf",
       "name": "IF Has Overdue",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [660, 300]
+      "position": [
+        1088,
+        704
+      ]
     },
     {
       "parameters": {
         "method": "POST",
         "url": "={{ $env.SLACK_WEBHOOK_ESCALATION }}",
-        "authentication": "none",
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
@@ -89,11 +100,14 @@
           "timeout": 15000
         }
       },
-      "id": "ee55ff66-0077-4118-2299-001122334455",
+      "id": "401b4985-0a8e-4d05-9aaf-d74d232df508",
       "name": "HTTP Slack Escalation",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [880, 180],
+      "position": [
+        1296,
+        576
+      ],
       "continueOnFail": true
     },
     {
@@ -102,15 +116,18 @@
         "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, executed_at)\nVALUES ('workflow-monitoring', '{{ $execution.id }}', 'SUCCESS', {{ $('Code Prepare Escalation').first().json.overdueCount }}, NOW())",
         "options": {}
       },
-      "id": "ff66aa77-bb88-4229-33aa-112233445566",
+      "id": "cc41b368-e47f-41dd-8197-7123c8155bba",
       "name": "Postgres Audit Log",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1100, 180],
+      "position": [
+        1520,
+        576
+      ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
@@ -120,15 +137,18 @@
         "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, executed_at)\nVALUES ('workflow-monitoring', '{{ $execution.id }}', 'SUCCESS', 0, NOW())",
         "options": {}
       },
-      "id": "aa77bb88-cc99-43aa-4bbb-223344556677",
+      "id": "ec26f507-8432-4550-ae5f-627cd98b4e98",
       "name": "Postgres Audit Empty",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [880, 460],
+      "position": [
+        1296,
+        864
+      ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
@@ -138,11 +158,14 @@
         "height": 420,
         "width": 500
       },
-      "id": "sticky-monitoring-doc",
+      "id": "f6073a61-60ba-4c4b-8069-55ef191620cb",
       "name": "Documentation",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [0, -220]
+      "position": [
+        416,
+        176
+      ]
     }
   ],
   "pinData": {},
@@ -150,54 +173,76 @@
     "Schedule Trigger": {
       "main": [
         [
-          { "node": "Postgres Query SLA Overdue", "type": "main", "index": 0 }
+          {
+            "node": "Postgres Query SLA Overdue",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Postgres Query SLA Overdue": {
       "main": [
         [
-          { "node": "Code Prepare Escalation", "type": "main", "index": 0 }
+          {
+            "node": "Code Prepare Escalation",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Code Prepare Escalation": {
       "main": [
         [
-          { "node": "IF Has Overdue", "type": "main", "index": 0 }
+          {
+            "node": "IF Has Overdue",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "IF Has Overdue": {
       "main": [
         [
-          { "node": "HTTP Slack Escalation", "type": "main", "index": 0 }
+          {
+            "node": "HTTP Slack Escalation",
+            "type": "main",
+            "index": 0
+          }
         ],
         [
-          { "node": "Postgres Audit Empty", "type": "main", "index": 0 }
+          {
+            "node": "Postgres Audit Empty",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "HTTP Slack Escalation": {
       "main": [
         [
-          { "node": "Postgres Audit Log", "type": "main", "index": 0 }
+          {
+            "node": "Postgres Audit Log",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1",
-    "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "binaryMode": "separate"
   },
-  "versionId": "4d5e6f7a-8b9c-0123-efab-345678901234",
+  "versionId": "a903bb7c-9a76-455c-b123-0fc58431ecad",
   "meta": {
     "templateCredsSetupCompleted": true,
-    "instanceId": ""
+    "instanceId": "37824f2512ad3f3e84093cd40d3306dc41ad731f1d52c76d10afeb027e69edfe"
   },
-  "id": "monitoring-v1",
+  "id": "rDfG2kCin2YckSdz",
   "tags": []
 }

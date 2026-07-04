@@ -12,19 +12,17 @@
           ]
         }
       },
-      "id": "c9d4e5f6-a1b2-4c3d-8e9f-0a1b2c3d4e5f",
+      "id": "5ba9875c-1814-49f4-bde0-f3cf51e37314",
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [
-        0,
-        300
+        304,
+        784
       ]
     },
     {
       "parameters": {
-        "mode": "manual",
-        "duplicateItem": false,
         "assignments": {
           "assignments": [
             {
@@ -49,29 +47,18 @@
         },
         "options": {}
       },
-      "id": "d0e1f2a3-b4c5-4d6e-9f0a-1b2c3d4e5f60",
+      "id": "2e732184-204b-42d1-9ec2-d1c6acdf6a9f",
       "name": "Set Date Window",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        220,
-        300
+        528,
+        784
       ]
     },
     {
       "parameters": {
-        "method": "GET",
         "url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
-        "authentication": "none",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "apiKey",
-              "value": "={{ $env.NVD_API_KEY }}"
-            }
-          ]
-        },
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -93,36 +80,44 @@
             }
           ]
         },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apiKey",
+              "value": "=530b7636-d7e3-4288-b909-d334937b5e7d"
+            }
+          ]
+        },
         "options": {
-          "timeout": 60000,
           "response": {
             "response": {
               "responseFormat": "json"
             }
-          }
+          },
+          "timeout": 60000
         }
       },
-      "id": "e1f2a3b4-c5d6-4e7f-a0b1-2c3d4e5f6a71",
+      "id": "0fa4176d-dacc-4339-8e07-6d8566506e11",
       "name": "HTTP Request NVD",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        440,
-        300
+        752,
+        784
       ]
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
         "jsCode": "const items = $input.all();\nconst response = items[0].json;\nconst vulnerabilities = response.vulnerabilities || [];\nconst totalResults = response.totalResults || 0;\nconst resultsPerPage = response.resultsPerPage || 2000;\nconst startIndex = response.startIndex || 0;\nconst executionStart = Date.now();\n\nif (vulnerabilities.length === 0) {\n  return [{\n    json: {\n      _isEmpty: true,\n      totalResults: 0,\n      parsedCount: 0,\n      needsPagination: false,\n      executionStart\n    }\n  }];\n}\n\nreturn vulnerabilities.map(item => {\n  const cve = item.cve;\n\n  // Description — prefer English\n  const descriptions = cve.descriptions || [];\n  const enDesc = descriptions.find(d => d.lang === 'en');\n  const rawDesc = enDesc ? enDesc.value : (descriptions[0] ? descriptions[0].value : '');\n  const description = rawDesc.replace(/'/g, \"''\").replace(/\\$/g, \"'||chr(36)||'\");\n\n  // CVSS: prefer v3.1 → v3.0 → v2 fallback\n  const metrics = cve.metrics || {};\n  const cvssV3data = ((metrics.cvssMetricV31 || []).length\n    ? metrics.cvssMetricV31\n    : (metrics.cvssMetricV30 || []))[0];\n  const cvssV2data = (metrics.cvssMetricV2 || [])[0];\n  const cvssV3 = cvssV3data ? cvssV3data.cvssData : null;\n  const cvssV2 = cvssV2data ? cvssV2data.cvssData : null;\n\n  // CWE — skip NVD internal placeholders\n  let cweId = null;\n  const weakness = (cve.weaknesses || [])[0];\n  if (weakness && weakness.description && weakness.description[0]) {\n    const val = weakness.description[0].value;\n    if (val && !val.startsWith('NVD-CWE')) {\n      cweId = val;\n    }\n  }\n\n  // Configurations → JSONB string (null when absent)\n  const configurationsRaw = (cve.configurations || []).length\n    ? JSON.stringify(cve.configurations)\n    : null;\n  const configurations = configurationsRaw\n    ? configurationsRaw.replace(/\\$/g, \"'||chr(36)||'\")\n    : null;\n\n  // References → JSONB string stored as patch_references\n  const refs = (cve.references || []).map(r => ({\n    url: r.url,\n    source: r.source || null,\n    tags: r.tags || []\n  }));\n  const refsRaw = refs.length ? JSON.stringify(refs) : null;\n  const patch_references = refsRaw\n    ? refsRaw.replace(/\\$/g, \"'||chr(36)||'\")\n    : null;\n\n  return {\n    json: {\n      cve_id:             cve.id,\n      description,\n      cvss_v3_base_score: cvssV3 ? cvssV3.baseScore    : null,\n      cvss_v3_vector:     cvssV3 ? cvssV3.vectorString  : null,\n      cvss_v3_severity:   cvssV3 ? cvssV3.baseSeverity  : null,\n      cvss_v2_base_score: cvssV2 ? cvssV2.baseScore    : null,\n      cwe_id:             cweId,\n      published_date:     cve.published,\n      last_modified_date: cve.lastModified || null,\n      configurations,\n      patch_references,\n      _meta: {\n        totalResults,\n        parsedCount:     vulnerabilities.length,\n        needsPagination: totalResults > startIndex + resultsPerPage,\n        executionStart\n      }\n    }\n  };\n});"
       },
-      "id": "f2a3b4c5-d6e7-4f80-b1c2-3d4e5f6a7b82",
+      "id": "47451f6d-928d-404e-ba4a-fa14c9e188e0",
       "name": "Parse NVD Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        660,
-        300
+        976,
+        784
       ]
     },
     {
@@ -131,7 +126,8 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "strict",
+            "version": 1
           },
           "conditions": [
             {
@@ -149,13 +145,13 @@
         },
         "options": {}
       },
-      "id": "a3b4c5d6-e7f8-4091-c2d3-4e5f6a7b8c93",
+      "id": "67289570-2e94-4e92-95d0-5a1020b2645c",
       "name": "IF Has CVEs",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        880,
-        300
+        1184,
+        784
       ]
     },
     {
@@ -166,33 +162,32 @@
           "queryBatching": "independently"
         }
       },
-      "id": "b4c5d6e7-f8a9-4102-d3e4-5f6a7b8c9d04",
+      "id": "49301470-5356-4bfd-8a54-f39418308792",
       "name": "Postgres Upsert CVEs",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1100,
-        180
+        1408,
+        672
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
         "jsCode": "const upserted = $input.all();\nconst parseFirst = $('Parse NVD Response').first();\nconst meta = (parseFirst && parseFirst.json._meta) ? parseFirst.json._meta : {};\nconst executionTimeMs = Date.now() - (meta.executionStart || Date.now());\nconst needsPagination = meta.needsPagination || false;\n\nreturn [{\n  json: {\n    recordsProcessed: upserted.length,\n    totalResults:     meta.totalResults || upserted.length,\n    needsPagination,\n    executionTimeMs,\n    auditStatus: needsPagination ? 'PARTIAL' : 'SUCCESS',\n    errorMessage: needsPagination\n      ? 'Only ' + upserted.length + ' of ' + meta.totalResults + ' CVEs fetched (NVD window > 2000). Implement loop pagination.'\n      : null\n  }\n}];"
       },
-      "id": "c5d6e7f8-a9b0-4213-e4f5-6a7b8c9d0e15",
+      "id": "9164957f-eb1c-4a05-b7a4-8d7513f56e43",
       "name": "Aggregate Stats",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1320,
-        180
+        1632,
+        672
       ]
     },
     {
@@ -201,18 +196,18 @@
         "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, execution_time_ms, executed_at)\nVALUES ('workflow-collection', '{{ $execution.id }}', '{{ $json.auditStatus }}', {{ $json.recordsProcessed }}, NULLIF(NULLIF('{{ $json.errorMessage }}', ''), 'null'), {{ $json.executionTimeMs }}, NOW())",
         "options": {}
       },
-      "id": "e7f8a9b0-c1d2-4435-a6b7-8c9d0e1f2a37",
+      "id": "65863664-47ed-4339-80ff-b0fdd84b874a",
       "name": "Postgres Audit Log",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1540,
-        180
+        1856,
+        672
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
@@ -222,18 +217,18 @@
         "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, execution_time_ms, executed_at)\nVALUES ('workflow-collection', '{{ $execution.id }}', 'SUCCESS', 0, 'No CVEs published in the last 24h window.', {{ Date.now() - ($json.executionStart || Date.now()) }}, NOW())",
         "options": {}
       },
-      "id": "a9b0c1d2-e3f4-4657-c8d9-0e1f2a3b4c59",
+      "id": "5c50b523-5108-4c84-981b-2a8b3d89d2ce",
       "name": "Postgres Audit Empty",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1100,
-        460
+        1408,
+        944
       ],
       "credentials": {
         "postgres": {
-          "id": "FRusji7kY5XCUBWW",
-          "name": "VulnPatchNotifier Postgres"
+          "id": "RWPaeiOcwep1ah3i",
+          "name": "Postgres account"
         }
       }
     },
@@ -243,14 +238,29 @@
         "height": 380,
         "width": 460
       },
-      "id": "sticky-collection-doc",
+      "id": "02bd6a0d-8c23-4ae9-9c75-6e13a4638051",
       "name": "Documentation",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        0,
-        -160
+        304,
+        320
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/correlation-trigger",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2064,
+        672
+      ],
+      "id": "b235cc32-c593-4bed-a4cf-ea1c6df769f1",
+      "name": "HTTP Request"
     }
   ],
   "pinData": {},
@@ -338,20 +348,29 @@
           }
         ]
       ]
+    },
+    "Postgres Audit Log": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1",
-    "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "binaryMode": "separate"
   },
-  "versionId": "1a2b3c4d-5e6f-7890-abcd-ef1234567890",
+  "versionId": "e8b7805e-1d41-4a59-82e7-e12f3af4d401",
   "meta": {
     "templateCredsSetupCompleted": true,
-    "instanceId": ""
+    "instanceId": "37824f2512ad3f3e84093cd40d3306dc41ad731f1d52c76d10afeb027e69edfe"
   },
-  "id": "collection-v1",
+  "id": "4gRQ0M9IBpsussEa",
   "tags": []
 }
