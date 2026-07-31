@@ -115,4 +115,19 @@ psql -h localhost -p 5433 -U tu_usuario -d tu_base
 ### Detener el entorno
 
 ```bash
-docker compose down          #
+docker compose down          # detiene contenedores, conserva datos
+docker compose down -v       # ⚠️ también borra los volúmenes (postgres_data, n8n_data)
+```
+
+### Logs y troubleshooting
+
+```bash
+docker compose logs -f n8n
+docker compose logs -f postgres
+docker compose logs -f vuln-api
+docker compose restart n8n
+```
+
+## 📄 Licencia
+
+Proyecto Final Integrador — Tecnicatura Universitaria en Programación, UTN Facultad Regional Mendoza. Desarrollado por el grupo "Compila pero no corre".
