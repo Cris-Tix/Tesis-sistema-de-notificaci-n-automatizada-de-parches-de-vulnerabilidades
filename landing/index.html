@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VulnPatchNotifier — Remediación de vulnerabilidades, orquestada</title>
+  <meta name="description" content="Pipeline SOAR automatizado que reduce el tiempo de triage de vulnerabilidades de 168h de revisión manual a 2–4h. NVD, correlación CPE, risk score propio y trazabilidad de auditoría." />
+
+  <!-- Runtime env (DASHBOARD_URL / LANDING_URL) inyectado por docker-compose -->
+  <script src="env.js"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      --bg:        #0e1310;
+      --bg-2:      #0b0f0d;
+      --panel:     #161c19;
+      --panel-2:   #1b221e;
+      --line:      #26302b;
+      --line-soft: #202924;
+      --ink:       #dfe7e2;
+      --ink-dim:   #9aa9a1;
+      --ink-faint: #6c7a73;
+      --mint:      #7fc4a6;
+      --mint-dim:  #5f9c82;
+      --amber:     #e3a34a;
+      --red:       #d0524a;
+      --paper:     #ece7dc;
+      --paper-ink: #33302a;
+      --paper-dim: #6b665c;
+      --paper-line:#d3ccbc;
+
+      --serif: "Fraunces", Georgia, "Times New Roman", serif;
+      --sans:  "IBM Plex Sans", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      --mono:  "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+
+      --maxw: 1120px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1200px 600px at 80% -10%, rgba(127,196,166,0.07), transparent 60%),
+        radial-gradient(900px 500px at -10% 20%, rgba(127,196,166,0.04), transparent 55%),
+        var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    ::selection { background: rgba(127,196,166,0.28); color: #fff; }
+
+    .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+    h1, h2, h3 { font-family: var(--serif); font-weight: 600; letter-spacing: -0.01em; line-height: 1.08; margin: 0; }
+    .mono { font-family: var(--mono); }
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--mint-dim);
+      margin: 0 0 18px;
+    }
+
+    /* ── Nav ─────────────────────────────────────────── */
+    header.nav {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(14,19,16,0.82);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line-soft);
+    }
+    .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 66px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand .mark {
+      width: 34px; height: 34px; border-radius: 9px;
+      display: grid; place-items: center;
+      background: linear-gradient(160deg, #223029, #18211c);
+      border: 1px solid var(--line);
+    }
+    .brand .mark svg { width: 19px; height: 19px; }
+    .brand .name { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
+    .brand .sub { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint); }
+    .nav-links { display: flex; align-items: center; gap: 26px; }
+    .nav-links .lnk { font-size: 14px; color: var(--ink-dim); transition: color .18s; }
+    .nav-links .lnk:hover { color: var(--ink); }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 9px;
+      font-family: var(--sans); font-size: 14px; font-weight: 600;
+      padding: 10px 18px; border-radius: 9px;
+      border: 1px solid transparent; cursor: pointer; transition: all .18s;
+    }
+    .btn-primary { background: var(--mint); color: #0c130f; }
+    .btn-primary:hover { background: #93d2b6; transform: translateY(-1px); }
+    .btn-ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+    .btn-ghost:hover { border-color: var(--mint-dim); color: #fff; }
+    .btn svg { width: 16px; height: 16px; }
+
+    /* ── Hero ────────────────────────────────────────── */
+    .hero { padding: 84px 0 60px; position: relative; }
+    .hero h1 { font-size: clamp(34px, 5.4vw, 62px); max-width: 16ch; }
+    .hero h1 em { font-style: italic; color: var(--mint); }
+    .hero .lede { max-width: 56ch; margin: 24px 0 0; font-size: 18px; color: var(--ink-dim); }
+
+    /* Compression bar (signature element) */
+    .compress { margin-top: 52px; }
+    .compress-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; flex-wrap: wrap; gap: 8px; }
+    .compress-head .from { font-family: var(--mono); font-size: 13px; color: var(--ink-faint); }
+    .compress-head .from s { color: var(--ink-faint); text-decoration-color: var(--red); }
+    .compress-head .to { font-family: var(--mono); font-size: 13px; color: var(--mint); }
+
+    .bar {
+      position: relative;
+      height: 72px;
+      border-radius: 12px;
+      background:
+        repeating-linear-gradient(135deg, rgba(208,82,74,0.06) 0 8px, transparent 8px 16px),
+        var(--panel);
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .bar-fill {
+      position: absolute; inset: 0 auto 0 0;
+      width: 100%;
+      background: linear-gradient(180deg, rgba(127,196,166,0.28), rgba(127,196,166,0.12));
+      border-right: 2px solid var(--mint);
+      border-radius: 12px 0 0 12px;
+      transition: width 1900ms cubic-bezier(.16,.84,.36,1);
+    }
+    .bar.run .bar-fill { width: 21%; }
+    .bar-saved {
+      position: absolute; top: 0; right: 0; bottom: 0; left: 21%;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 700ms ease 1400ms;
+      font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint); letter-spacing: 0.04em;
+    }
+    .bar.run .bar-saved { opacity: 1; }
+
+    .ticks { position: absolute; inset: 0; }
+    .tick {
+      position: absolute; top: 0; bottom: 0; width: 1px;
+      background: rgba(127,196,166,0.35);
+    }
+    .tick .dot {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%) scale(0);
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--mint); box-shadow: 0 0 0 3px rgba(127,196,166,0.16);
+      transition: transform 320ms cubic-bezier(.2,1.4,.4,1);
+    }
+    .tick .lbl {
+      position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+      font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--ink-faint); white-space: nowrap; opacity: 0; transition: opacity 300ms ease;
+    }
+    .bar.run .tick .dot { transform: translate(-50%,-50%) scale(1); }
+    .compress.reveal-on .tick .lbl { opacity: 1; }
+    .compress-stages { position: relative; height: 22px; margin-top: 22px; }
+
+    .compress-note { margin-top: 34px; font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint); }
+
+    /* ── Context strip ───────────────────────────────── */
+    .strip { border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); background: var(--bg-2); }
+    .strip-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .strip-cell { padding: 34px 24px; border-left: 1px solid var(--line-soft); }
+    .strip-cell:first-child { border-left: none; }
+    .strip-cell .n { font-family: var(--serif); font-size: 38px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }
+    .strip-cell .n .u { font-size: 18px; color: var(--mint-dim); }
+    .strip-cell .k { margin-top: 10px; font-size: 13px; color: var(--ink-dim); line-height: 1.45; }
+    .strip-cell.up .n { color: var(--amber); }
+
+    /* ── Section scaffolding ─────────────────────────── */
+    section.block { padding: 92px 0; }
+    .sec-head { max-width: 62ch; margin-bottom: 52px; }
+    .sec-head h2 { font-size: clamp(26px, 3.4vw, 38px); }
+    .sec-head p { margin: 18px 0 0; color: var(--ink-dim); font-size: 17px; }
+
+    /* ── Pipeline ────────────────────────────────────── */
+    .pipe { display: grid; gap: 14px; }
+    .stage {
+      display: grid; grid-template-columns: 62px 1fr auto; align-items: center; gap: 22px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      padding: 22px 26px; transition: border-color .2s, transform .2s;
+    }
+    .stage:hover { border-color: var(--mint-dim); transform: translateX(3px); }
+    .stage .num { font-family: var(--serif); font-size: 30px; color: var(--mint); font-weight: 600; }
+    .stage .body h3 { font-size: 19px; margin-bottom: 5px; }
+    .stage .body p { margin: 0; color: var(--ink-dim); font-size: 14.5px; max-width: 64ch; }
+    .stage .meta { text-align: right; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); white-space: nowrap; }
+    .stage .meta .trg { color: var(--mint-dim); }
+
+    /* ── Two-col: matching + formula ─────────────────── */
+    .split { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 28px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 30px; }
+    .card > h3 { font-size: 21px; margin-bottom: 6px; }
+    .card > .cap { color: var(--ink-dim); font-size: 14.5px; margin: 0 0 22px; }
+
+    .conf { display: grid; gap: 10px; }
+    .conf-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 16px; padding: 13px 0; border-top: 1px solid var(--line-soft); }
+    .conf-row:first-of-type { border-top: none; }
+    .conf-row .idx { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); width: 20px; }
+    .conf-row .lv .t { font-weight: 600; font-size: 15px; }
+    .conf-row .lv .d { font-size: 12.5px; color: var(--ink-faint); font-family: var(--mono); }
+    .conf-bar { width: 108px; height: 6px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
+    .conf-bar i { display: block; height: 100%; background: var(--mint); border-radius: 4px; }
+
+    .formula { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 22px; font-family: var(--mono); font-size: 13.5px; line-height: 2; overflow-x: auto; }
+    .formula .op { color: var(--ink-faint); }
+    .formula .w { color: var(--amber); }
+    .formula .term { color: var(--ink); }
+    .formula .kev { color: var(--mint); }
+    .formula .cap { display: block; margin-top: 12px; color: var(--ink-faint); font-size: 12px; }
+
+    .tiers { display: grid; gap: 8px; margin-top: 22px; }
+    .tier { display: grid; grid-template-columns: 12px 1fr auto auto; align-items: center; gap: 14px; font-size: 13.5px; padding: 9px 0; border-top: 1px solid var(--line-soft); }
+    .tier:first-child { border-top: none; }
+    .tier .sw { width: 11px; height: 11px; border-radius: 3px; }
+    .tier .nm { font-weight: 600; }
+    .tier .rg, .tier .sla { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); }
+    .tier .sla { color: var(--ink-faint); }
+
+    /* ── Dashboard preview ───────────────────────────── */
+    .dash {
+      background: #0A0E1A; border: 1px solid #1E2A3A; border-radius: 16px; overflow: hidden;
+      box-shadow: 0 30px 80px -40px rgba(0,0,0,0.8);
+    }
+    .dash-top { display: flex; align-items: center; gap: 8px; padding: 13px 18px; border-bottom: 1px solid #1E2A3A; background: #0E1B32; }
+    .dash-top .dot3 { display: flex; gap: 6px; }
+    .dash-top .dot3 i { width: 10px; height: 10px; border-radius: 50%; background: #253248; display: block; }
+    .dash-top .u { margin-left: 8px; font-family: var(--mono); font-size: 12px; color: #6B7280; }
+    .dash-body { padding: 22px; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+    .kpi { background: #111827; border: 1px solid #1E2A3A; border-radius: 12px; padding: 16px; position: relative; overflow: hidden; }
+    .kpi::before { content:""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--acc, #1F3A6B); }
+    .kpi .t { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #6B7280; }
+    .kpi .v { font-family: var(--serif); font-size: 30px; font-weight: 600; color: #fff; margin-top: 8px; line-height: 1; }
+    .kpi .s { font-size: 11px; color: #4B5563; margin-top: 8px; }
+
+    .dtable { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .dtable th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: #6B7280; font-weight: 600; padding: 10px 12px; border-bottom: 1px solid #1E2A3A; }
+    .dtable td { padding: 12px; border-bottom: 1px solid #1E2A3A; color: #E5E7EB; vertical-align: middle; }
+    .dtable tr:last-child td { border-bottom: none; }
+    .dtable .cve { font-family: var(--mono); color: #60A5FA; }
+    .dtable .asset .p { color: #fff; font-weight: 500; }
+    .dtable .asset .m { font-size: 11px; color: #6B7280; font-family: var(--mono); }
+    .dtable .num { font-family: var(--mono); tab-size: 2; }
+    .badge { font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; padding: 3px 8px; border-radius: 5px; }
+    .b-crit { background: rgba(163,45,45,0.22); color: #f0908a; }
+    .b-high { background: rgba(24,95,165,0.24); color: #7fb2e8; }
+    .b-med  { background: rgba(59,109,17,0.24); color: #9fca6f; }
+    .sla-over { color: #F87171; }
+    .sla-warn { color: #FCD34D; }
+    .sla-ok   { color: #86EFAC; }
+    .dash-cap { margin-top: 16px; font-family: var(--mono); font-size: 12px; color: var(--ink-faint); text-align: center; }
+
+    /* ── Audit / trust (paper inset) ─────────────────── */
+    .paper {
+      background: var(--paper); color: var(--paper-ink);
+      border-radius: 18px; padding: 46px 44px;
+      box-shadow: inset 0 0 0 1px var(--paper-line), 0 24px 60px -34px rgba(0,0,0,0.7);
+      position: relative;
+    }
+    .paper::after {
+      content: ""; position: absolute; inset: 0; border-radius: 18px; pointer-events: none;
+      background: repeating-linear-gradient(0deg, transparent 0 27px, rgba(51,48,42,0.045) 27px 28px);
+    }
+    .paper .eyebrow { color: #9a7d3f; }
+    .paper h2 { color: var(--paper-ink); font-size: clamp(24px, 3vw, 34px); }
+    .paper .intro { color: var(--paper-dim); max-width: 60ch; margin: 16px 0 30px; font-size: 16px; }
+    .ledger { position: relative; z-index: 1; background: #f6f2ea; border: 1px solid var(--paper-line); border-radius: 10px; overflow: hidden; }
+    .ledger .lh { display: flex; justify-content: space-between; padding: 12px 18px; border-bottom: 1px solid var(--paper-line); font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: #8a8474; }
+    .ltable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
+    .ltable td { padding: 11px 18px; border-bottom: 1px solid #e4ddce; color: var(--paper-ink); }
+    .ltable tr:last-child td { border-bottom: none; }
+    .ltable .ts { color: var(--paper-dim); white-space: nowrap; }
+    .ltable .wf { font-weight: 600; }
+    .st { font-weight: 600; font-size: 11px; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 4px; }
+    .st-ok { background: rgba(95,156,130,0.22); color: #35694f; }
+    .st-part { background: rgba(227,163,74,0.22); color: #976a1e; }
+    .ltable .msg { color: var(--paper-dim); }
+    .paper .foot { position: relative; z-index: 1; margin-top: 24px; display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--paper-dim); }
+    .paper .foot svg { width: 17px; height: 17px; flex-shrink: 0; color: #5f9c82; }
+
+    /* ── Stack ───────────────────────────────────────── */
+    .stack-strip { display: flex; flex-wrap: wrap; gap: 12px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 9px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+      padding: 11px 18px; font-size: 13.5px; color: var(--ink-dim);
+      font-family: var(--mono); letter-spacing: 0.02em;
+    }
+    .chip b { width: 7px; height: 7px; border-radius: 50%; background: var(--mint-dim); }
+
+    /* ── CTA ─────────────────────────────────────────── */
+    .cta { text-align: center; padding: 100px 0; border-top: 1px solid var(--line-soft); }
+    .cta h2 { font-size: clamp(28px, 4vw, 44px); max-width: 20ch; margin: 0 auto; }
+    .cta p { color: var(--ink-dim); max-width: 52ch; margin: 20px auto 34px; font-size: 17px; }
+    .cta-actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+    footer { border-top: 1px solid var(--line-soft); padding: 34px 0; }
+    .foot-inner { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--ink-faint); }
+    .foot-inner .mono { font-size: 12px; }
+
+    /* ── Reveal on scroll ────────────────────────────── */
+    .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s ease, transform .7s cubic-bezier(.16,.84,.36,1); }
+    .reveal.reveal-on { opacity: 1; transform: none; }
+    @media (prefers-reduced-motion: reduce) {
+      .reveal { opacity: 1; transform: none; transition: none; }
+      .bar-fill, .bar-saved, .tick .dot, .tick .lbl { transition: none !important; }
+    }
+
+    /* ── Responsive ──────────────────────────────────── */
+    @media (max-width: 860px) {
+      .strip-grid { grid-template-columns: 1fr 1fr; }
+      .strip-cell:nth-child(3) { border-left: none; }
+      .split { grid-template-columns: 1fr; }
+      .kpis { grid-template-columns: 1fr 1fr; }
+      .stage { grid-template-columns: 44px 1fr; }
+      .stage .meta { grid-column: 2; text-align: left; margin-top: 4px; }
+      .nav-links .lnk { display: none; }
+    }
+    @media (max-width: 560px) {
+      .strip-grid { grid-template-columns: 1fr; }
+      .strip-cell { border-left: none; border-top: 1px solid var(--line-soft); }
+      .strip-cell:first-child { border-top: none; }
+      .kpis { grid-template-columns: 1fr; }
+      .dash-body { padding: 14px; }
+      .paper { padding: 30px 22px; }
+      .dtable-scroll, .ledger-scroll { overflow-x: auto; }
+    }
+    .dtable-scroll, .ledger-scroll { overflow-x: auto; }
+  </style>
+</head>
+<body>
+
+  <!-- ═══ NAV ═══ -->
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top">
+        <span class="mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#7fc4a6" stroke-width="1.7">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.96 11.96 0 013.6 6 12 12 0 003 9.75c0 5.59 3.82 10.29 9 11.62 5.18-1.33 9-6.03 9-11.62 0-1.31-.21-2.57-.6-3.75h-.15c-3.2 0-6.1-1.25-8.25-3.29z"/>
+          </svg>
+        </span>
+        <span>
+          <div class="name">VulnPatchNotifier</div>
+          <div class="sub">SOAR · Patch Notifier</div>
+        </span>
+      </a>
+      <nav class="nav-links">
+        <a class="lnk" href="#pipeline">Pipeline</a>
+        <a class="lnk" href="#scoring">Scoring</a>
+        <a class="lnk" href="#auditoria">Auditoría</a>
+        <a class="btn btn-primary" data-dashboard-link href="http://localhost:3001">
+          Ver dashboard
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/></svg>
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <span id="top"></span>
+
+  <!-- ═══ HERO ═══ -->
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Security Orchestration · Automation · Response</p>
+      <h1>El triage de vulnerabilidades pasa de <em>168&nbsp;horas</em> a <em>2–4&nbsp;horas</em>.</h1>
+      <p class="lede">
+        Un pipeline SOAR de cinco etapas, orquestado en n8n, que ingiere el feed de la NVD,
+        correlaciona cada CVE contra tu inventario real, calcula un risk score propio con
+        exposición de Shodan y CISA&nbsp;KEV, y notifica al equipo — dejando registro de cada corrida.
+      </p>
+
+      <!-- Signature: compression bar -->
+      <div class="compress" id="compress">
+        <div class="compress-head">
+          <span class="from"><s>168&nbsp;h — revisión manual, hoja de cálculo, correo</s></span>
+          <span class="to">2–4&nbsp;h — pipeline automatizado, extremo a extremo</span>
+        </div>
+        <div class="bar" id="bar">
+          <div class="bar-fill"></div>
+          <div class="bar-saved">≈ 164&nbsp;h eliminadas del ciclo de triage</div>
+          <div class="ticks" id="ticks"><!-- stage ticks injected --></div>
+        </div>
+        <div class="compress-stages" id="stage-labels"><!-- tick labels injected --></div>
+        <p class="compress-note">— Cada tick es una etapa real del pipeline. La barra se contrae al cargar; ese es el dato central del sistema.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ CONTEXT STRIP ═══ -->
+  <div class="strip">
+    <div class="wrap">
+      <div class="strip-grid">
+        <div class="strip-cell reveal">
+          <div class="n">40.009</div>
+          <div class="k">CVEs publicadas en la NVD durante 2024 — el volumen que ningún equipo revisa a mano.</div>
+        </div>
+        <div class="strip-cell up reveal">
+          <div class="n">+38<span class="u">%</span></div>
+          <div class="k">de crecimiento interanual respecto de 2023. La curva no se aplana.</div>
+        </div>
+        <div class="strip-cell reveal">
+          <div class="n">4<span class="u"> niveles</span></div>
+          <div class="k">de confianza en el matching CPE: exacto, rango de versión, wildcard y heurístico.</div>
+        </div>
+        <div class="strip-cell reveal">
+          <div class="n">8<span class="u"> activos</span></div>
+          <div class="k">en el inventario de validación, correlacionados en cada corrida sin intervención manual.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ PIPELINE ═══ -->
+  <section class="block" id="pipeline">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="eyebrow">El pipeline</p>
+        <h2>Cinco etapas encadenadas. Una secuencia, no un montón de scripts sueltos.</h2>
+        <p>Cada etapa es un workflow de n8n disparado por cron o por la etapa anterior. El estado vive en PostgreSQL; nada depende de que alguien se acuerde de correr el siguiente paso.</p>
+      </div>
+
+      <div class="pipe">
+        <div class="stage reveal">
+          <div class="num">1</div>
+          <div class="body">
+            <h3>Collection</h3>
+            <p>Consulta la API de la NVD, parsea las CVEs y hace upsert idempotente en la tabla <span class="mono">cves</span>. Re-correr no duplica nada (<span class="mono">ON CONFLICT DO UPDATE</span>).</p>
+          </div>
+          <div class="meta"><span class="trg">CRON</span> · diario 02:00 UTC</div>
+        </div>
+
+        <div class="stage reveal">
+          <div class="num">2</div>
+          <div class="body">
+            <h3>Correlation</h3>
+            <p>Matchea cada CVE contra el <span class="mono">software_inventory</span> por CPE en cuatro niveles de confianza y puebla <span class="mono">applicable_vulnerabilities</span>. Las CVEs sin configuración CPE no se correlacionan.</p>
+          </div>
+          <div class="meta"><span class="trg">ENCADENADO</span> · tras Collection</div>
+        </div>
+
+        <div class="stage reveal">
+          <div class="num">3</div>
+          <div class="body">
+            <h3>Prioritization</h3>
+            <p>Calcula el risk score con la fórmula ponderada (CVSS base + temporal + exposición Shodan + criticidad + bonus KEV) y asigna el <span class="mono">criticality_tier</span> con su SLA.</p>
+          </div>
+          <div class="meta"><span class="trg">ENCADENADO</span> · tras Correlation</div>
+        </div>
+
+        <div class="stage reveal">
+          <div class="num">4</div>
+          <div class="body">
+            <h3>Alerts</h3>
+            <p>Genera el correo HTML y el mensaje de Slack (Block Kit), los envía y registra el envío en <span class="mono">vulnerability_alerts</span>. El MTTR se mide desde <span class="mono">sent_at</span>.</p>
+          </div>
+          <div class="meta"><span class="trg">ENCADENADO</span> · tras Prioritization</div>
+        </div>
+
+        <div class="stage reveal">
+          <div class="num">5</div>
+          <div class="body">
+            <h3>Monitoring</h3>
+            <p>Revisa SLAs vencidos y dispara el canal de escalamiento. Corre en paralelo al ciclo diario para no dejar remediaciones fuera de plazo sin aviso.</p>
+          </div>
+          <div class="meta"><span class="trg">CRON</span> · horario</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ SCORING ═══ -->
+  <section class="block" id="scoring">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="eyebrow">Correlación &amp; scoring</p>
+        <h2>No todo CVSS 9.8 es urgente. El contexto decide.</h2>
+        <p>El matching sabe cuánta confianza tiene en cada correlación, y el score pondera exposición real y explotación conocida por encima de la severidad nominal.</p>
+      </div>
+
+      <div class="split">
+        <!-- Matching confidence -->
+        <div class="card reveal">
+          <h3>Matching CPE — 4 niveles de confianza</h3>
+          <p class="cap">Cada correlación queda etiquetada con el nivel que la produjo, para separar lo seguro de lo heurístico.</p>
+          <div class="conf">
+            <div class="conf-row">
+              <span class="idx">01</span>
+              <span class="lv"><div class="t">Exacto</div><div class="d">cpe:2.3 idéntico — vendor · product · version</div></span>
+              <span class="conf-bar"><i style="width:100%"></i></span>
+            </div>
+            <div class="conf-row">
+              <span class="idx">02</span>
+              <span class="lv"><div class="t">Rango de versión</div><div class="d">versionStartIncluding … versionEndExcluding</div></span>
+              <span class="conf-bar"><i style="width:80%"></i></span>
+            </div>
+            <div class="conf-row">
+              <span class="idx">03</span>
+              <span class="lv"><div class="t">Wildcard</div><div class="d">product coincide, version = <span class="mono">*</span></div></span>
+              <span class="conf-bar"><i style="width:55%"></i></span>
+            </div>
+            <div class="conf-row">
+              <span class="idx">04</span>
+              <span class="lv"><div class="t">Heurístico</div><div class="d">normalización de nombre vendor/product</div></span>
+              <span class="conf-bar"><i style="width:32%"></i></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Risk formula -->
+        <div class="card reveal">
+          <h3>Risk score</h3>
+          <p class="cap">Fórmula ponderada, acotada a 10.0. El bonus KEV levanta lo que ya se explota en la práctica.</p>
+          <div class="formula">
+            <span class="w">0.35</span><span class="op">×</span><span class="term">CVSS_base</span> <span class="op">+</span>
+            <span class="w">0.25</span><span class="op">×</span><span class="term">CVSS_temporal</span> <span class="op">+</span><br/>
+            <span class="w">0.20</span><span class="op">×</span><span class="term">Exposición</span> <span class="op">+</span>
+            <span class="w">0.15</span><span class="op">×</span><span class="term">Criticidad</span> <span class="op">+</span>
+            <span class="kev">KEV_bonus</span>
+            <span class="cap">Exposición desde Shodan · fallback conservador = 3 si Shodan falla · cap 10.0</span>
+          </div>
+          <div class="tiers">
+            <div class="tier"><span class="sw" style="background:#d0524a"></span><span class="nm">CRITICAL</span><span class="rg">≥ 8.5</span><span class="sla">SLA 24 h</span></div>
+            <div class="tier"><span class="sw" style="background:#e3a34a"></span><span class="nm">HIGH</span><span class="rg">7.0 – 8.4</span><span class="sla">SLA 72 h</span></div>
+            <div class="tier"><span class="sw" style="background:#c9b64e"></span><span class="nm">MEDIUM</span><span class="rg">5.0 – 6.9</span><span class="sla">SLA 7 d</span></div>
+            <div class="tier"><span class="sw" style="background:#5f9c82"></span><span class="nm">LOW</span><span class="rg">&lt; 5.0</span><span class="sla">SLA 30 d</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ DASHBOARD PREVIEW ═══ -->
+  <section class="block">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="eyebrow">El dashboard</p>
+        <h2>El resultado, en una sola vista.</h2>
+        <p>KPIs de la operación y la tabla de vulnerabilidades aplicables — el mismo tablero al que llegás desde el botón «Ver dashboard».</p>
+      </div>
+
+      <div class="dash reveal">
+        <div class="dash-top">
+          <span class="dot3"><i></i><i></i><i></i></span>
+          <span class="u">vuln_dashboard · /overview</span>
+        </div>
+        <div class="dash-body">
+          <div class="kpis">
+            <div class="kpi" style="--acc:#1F3A6B"><div class="t">CVEs Procesados</div><div class="v">40.009</div><div class="s">Total en base de datos</div></div>
+            <div class="kpi" style="--acc:#A32D2D"><div class="t">Vuln. CRITICAL</div><div class="v">4</div><div class="s">Con tier CRITICAL asignado</div></div>
+            <div class="kpi" style="--acc:#D97706"><div class="t">Alertas Pendientes</div><div class="v">11</div><div class="s">No remediadas ni FP</div></div>
+            <div class="kpi" style="--acc:#22C55E"><div class="t">SLA Compliance</div><div class="v">91%</div><div class="s">Dentro del SLA</div></div>
+          </div>
+
+          <div class="dtable-scroll">
+            <table class="dtable">
+              <thead>
+                <tr>
+                  <th>CVE ID</th><th>Asset</th><th>CVSS</th><th>Risk Score</th><th>Tier</th><th>SLA</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="cve">CVE-2024-3094</td>
+                  <td class="asset"><div class="p">build-server-01</div><div class="m">xz-utils 5.6.0</div></td>
+                  <td class="num">10.0</td><td class="num">9.84</td>
+                  <td><span class="badge b-crit">CRITICAL</span></td>
+                  <td class="sla-warn">18h rest.</td>
+                </tr>
+                <tr>
+                  <td class="cve">CVE-2021-44228</td>
+                  <td class="asset"><div class="p">api-gateway</div><div class="m">Apache Log4j 2.14.1</div></td>
+                  <td class="num">10.0</td><td class="num">9.51</td>
+                  <td><span class="badge b-crit">CRITICAL</span></td>
+                  <td class="sla-over">Vencido</td>
+                </tr>
+                <tr>
+                  <td class="cve">CVE-2023-4863</td>
+                  <td class="asset"><div class="p">web-frontend</div><div class="m">libwebp 1.2.4</div></td>
+                  <td class="num">8.8</td><td class="num">8.12</td>
+                  <td><span class="badge b-high">HIGH</span></td>
+                  <td class="sla-warn">42h rest.</td>
+                </tr>
+                <tr>
+                  <td class="cve">CVE-2024-6387</td>
+                  <td class="asset"><div class="p">bastion-host</div><div class="m">OpenSSH 8.9p1</div></td>
+                  <td class="num">8.1</td><td class="num">7.63</td>
+                  <td><span class="badge b-high">HIGH</span></td>
+                  <td class="sla-ok">2d rest.</td>
+                </tr>
+                <tr>
+                  <td class="cve">CVE-2022-1471</td>
+                  <td class="asset"><div class="p">config-service</div><div class="m">SnakeYAML 1.30</div></td>
+                  <td class="num">9.8</td><td class="num">6.74</td>
+                  <td><span class="badge b-med">MEDIUM</span></td>
+                  <td class="sla-ok">5d rest.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <p class="dash-cap">Vista ilustrativa con datos del entorno de validación. El dashboard en vivo consume la API sobre PostgreSQL.</p>
+    </div>
+  </section>
+
+  <!-- ═══ AUDIT / TRUST ═══ -->
+  <section class="block" id="auditoria">
+    <div class="wrap">
+      <div class="paper reveal">
+        <p class="eyebrow">Trazabilidad</p>
+        <h2>Cada corrida deja registro. También las que no encuentran nada.</h2>
+        <p class="intro">
+          El <span class="mono">audit_log</span> guarda el resultado de cada ejecución de cada workflow — con estado
+          <span class="mono">SUCCESS</span>, <span class="mono">FAILED</span> o <span class="mono">PARTIAL</span>.
+          Que una corrida no encuentre vulnerabilidades nuevas no es silencio: es una fila que demuestra que el
+          sistema corrió y revisó.
+        </p>
+
+        <div class="ledger">
+          <div class="lh"><span>audit_log — última corrida diaria</span><span>run 2026-08-14</span></div>
+          <div class="ledger-scroll">
+            <table class="ltable">
+              <tbody>
+                <tr><td class="ts">02:00:03 UTC</td><td class="wf">Collection</td><td><span class="st st-ok">SUCCESS</span></td><td class="msg">312 CVEs ingeridas · 0 nuevas aplicables</td></tr>
+                <tr><td class="ts">02:04:11 UTC</td><td class="wf">Correlation</td><td><span class="st st-ok">SUCCESS</span></td><td class="msg">8 activos evaluados · 3 correlaciones</td></tr>
+                <tr><td class="ts">02:05:37 UTC</td><td class="wf">Prioritization</td><td><span class="st st-ok">SUCCESS</span></td><td class="msg">3 risk scores calculados</td></tr>
+                <tr><td class="ts">02:06:02 UTC</td><td class="wf">Alerts</td><td><span class="st st-part">PARTIAL</span></td><td class="msg">2 emails enviados · Shodan timeout → exposición=3</td></tr>
+                <tr><td class="ts">03:00:00 UTC</td><td class="wf">Monitoring</td><td><span class="st st-ok">SUCCESS</span></td><td class="msg">0 SLA vencidos · nada que escalar</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="foot">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          El degradado elegante: cuando Shodan no responde, la etapa no se cae — usa exposición = 3 y lo deja anotado.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ STACK ═══ -->
+  <section class="block">
+    <div class="wrap">
+      <div class="sec-head reveal" style="margin-bottom:34px">
+        <p class="eyebrow">Stack</p>
+        <h2>Todo self-hosted, todo en Docker Compose.</h2>
+      </div>
+      <div class="stack-strip reveal">
+        <span class="chip"><b></b>n8n</span>
+        <span class="chip"><b></b>PostgreSQL</span>
+        <span class="chip"><b></b>Redis</span>
+        <span class="chip"><b></b>Docker Compose</span>
+        <span class="chip"><b></b>NVD API</span>
+        <span class="chip"><b></b>Shodan</span>
+        <span class="chip"><b></b>CISA KEV</span>
+        <span class="chip"><b></b>Slack · Block Kit</span>
+        <span class="chip"><b></b>SMTP / Email HTML</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ CTA ═══ -->
+  <section class="cta">
+    <div class="wrap">
+      <h2 class="reveal"> Vení a ver el tablero corriendo.</h2>
+      <p class="reveal">El dashboard muestra el estado real del pipeline: KPIs, inventario y el audit log de cada corrida.</p>
+      <div class="cta-actions reveal">
+        <a class="btn btn-primary" data-dashboard-link href="http://localhost:3001">
+          Ver dashboard
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/></svg>
+        </a>
+        <a class="btn btn-ghost" href="#pipeline">Repasar el pipeline</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap foot-inner">
+      <span>VulnPatchNotifier — Compila pero no corre · UTN FRM</span>
+      <span class="mono">SOAR · n8n · PostgreSQL · Docker</span>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      // ── Cross-navigation: inject dashboard URL from runtime env ──
+      var env = window.__ENV__ || {};
+      var dash = env.DASHBOARD_URL || 'http://localhost:3001';
+      document.querySelectorAll('[data-dashboard-link]').forEach(function (a) { a.href = dash; });
+
+      // ── Compression bar: build stage ticks ──
+      var stages = [
+        { at: 4,  label: 'Collect' },
+        { at: 8,  label: 'Correlate' },
+        { at: 12, label: 'Prioritize' },
+        { at: 16, label: 'Alert' },
+        { at: 20, label: 'Monitor' }
+      ];
+      var ticks = document.getElementById('ticks');
+      var labels = document.getElementById('stage-labels');
+      stages.forEach(function (s, i) {
+        var t = document.createElement('div');
+        t.className = 'tick';
+        t.style.left = s.at + '%';
+        var d = document.createElement('span'); d.className = 'dot';
+        d.style.transitionDelay = (900 + i * 130) + 'ms';
+        t.appendChild(d);
+        ticks.appendChild(t);
+
+        var l = document.createElement('span');
+        l.className = 'mono';
+        l.textContent = (i + 1) + '. ' + s.label;
+        l.style.cssText = 'position:absolute;left:' + s.at + '%;transform:translateX(-50%);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);white-space:nowrap;';
+        labels.appendChild(l);
+      });
+
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      var bar = document.getElementById('bar');
+
+      // ── Reveal on scroll ──
+      var reveals = document.querySelectorAll('.reveal');
+      if (reduce || !('IntersectionObserver' in window)) {
+        reveals.forEach(function (el) { el.classList.add('reveal-on'); });
+        bar.classList.add('run');
+      } else {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { e.target.classList.add('reveal-on'); io.unobserve(e.target); }
+          });
+        }, { threshold: 0.14, rootMargin: '0px 0px -8% 0px' });
+        reveals.forEach(function (el) { io.observe(el); });
+
+        // Fire the compression animation shortly after load so it's the first thing seen.
+        window.addEventListener('load', function () {
+          setTimeout(function () {
+            bar.classList.add('run');
+            document.getElementById('compress').classList.add('reveal-on');
+          }, 260);
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

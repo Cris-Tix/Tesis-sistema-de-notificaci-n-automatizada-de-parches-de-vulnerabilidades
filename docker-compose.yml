@@ -135,12 +135,31 @@ services:
       dockerfile: Dockerfile
     container_name: vuln_dashboard
     restart: unless-stopped
+    environment:
+      # Cross-navigation URLs — injected into env.js at container start (not hardcoded).
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3001}
+      LANDING_URL: ${LANDING_URL:-http://localhost:3002}
     networks:
       - vuln-network
     ports:
       - "3001:80"
     depends_on:
       - vuln-api
+
+  landing:
+    build:
+      context: ./landing
+      dockerfile: Dockerfile
+    container_name: vuln_landing
+    restart: unless-stopped
+    environment:
+      # Cross-navigation URLs — injected into env.js at container start (not hardcoded).
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3001}
+      LANDING_URL: ${LANDING_URL:-http://localhost:3002}
+    networks:
+      - vuln-network
+    ports:
+      - "3002:80"
 
 networks:
   vuln-network:

@@ -53,7 +53,7 @@
     },
     {
       "parameters": {
-        "fromEmail": "e4cd6c2b41ed07@sandbox.smtp.mailtrap.io",
+        "fromEmail": "0845573449ee57@sandbox.smtp.mailtrap.io",
         "toEmail": "={{ $json.recipient_email }}",
         "subject": "={{ $json.subject }}",
         "html": "={{ $json.emailHtml }}",
@@ -192,6 +192,33 @@
         -32,
         912
       ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        528,
+        1120
+      ],
+      "id": "8ae1196d-8471-4b89-b661-97dee79a015b",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "amount": 30
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        752,
+        912
+      ],
+      "id": "54904852-216e-4a58-b139-3c01792a27a0",
+      "name": "Wait",
+      "webhookId": "ba9619ab-737c-419c-b766-b8644de548e3"
     }
   ],
   "pinData": {},
@@ -222,11 +249,6 @@
       "main": [
         [
           {
-            "node": "Send Email1",
-            "type": "main",
-            "index": 0
-          },
-          {
             "node": "HTTP Slack1",
             "type": "main",
             "index": 0
@@ -238,6 +260,11 @@
           },
           {
             "node": "Postgres Insert Slack Alert1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Loop Over Items",
             "type": "main",
             "index": 0
           }
@@ -265,6 +292,40 @@
           }
         ]
       ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Send Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email1": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": true,
@@ -272,7 +333,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "cae75319-a9a6-4170-8f6c-f41c6a6b2844",
+  "versionId": "5fd0088b-abe1-4761-8ff3-bb71be73a266",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "37824f2512ad3f3e84093cd40d3306dc41ad731f1d52c76d10afeb027e69edfe"

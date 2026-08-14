@@ -208,7 +208,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, executed_at)\nVALUES ('workflow-correlation', '{{ $execution.id }}', 'SUCCESS', 0, 'No CPE matches found for {{ $json.processedCount }} processed CVEs.', NOW())",
+        "query": "SET search_path TO vulnerability_management;\nINSERT INTO vulnerability_management.audit_log\n  (workflow_name, execution_id, status, records_processed, error_message, executed_at)\nVALUES ('workflow-correlation', '{{ $execution.id }}', 'SUCCESS', 0, 'No CPE matches found for {{ $('Code CPE Match').first().json.processedCount }} processed CVEs.', NOW())",
         "options": {}
       },
       "id": "75e1f73c-dd20-4391-af76-c55eca10d96c",
@@ -382,7 +382,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "ef29b564-13e3-498e-a185-ab47217663e3",
+  "versionId": "b9652441-0c63-470e-87aa-2255b089beff",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "37824f2512ad3f3e84093cd40d3306dc41ad731f1d52c76d10afeb027e69edfe"

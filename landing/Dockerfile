@@ -1,12 +1,8 @@
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json pnpm-lock.yaml ./
-RUN npm install --legacy-peer-deps
-COPY . .
-RUN npm run build
-
+# Lightweight static server for the single-file product landing.
 FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
+
+COPY index.html /usr/share/nginx/html/index.html
+COPY env.js     /usr/share/nginx/html/env.js
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Runtime env injection: writes env.js from DASHBOARD_URL/LANDING_URL before nginx starts.

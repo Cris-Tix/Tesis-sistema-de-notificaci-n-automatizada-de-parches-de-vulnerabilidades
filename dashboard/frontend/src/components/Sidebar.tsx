@@ -31,6 +31,11 @@ const NAV = [
   { to: '/audit-log',  label: 'Audit Log',  Icon: ListIcon },
 ]
 
+// Runtime env injected by docker-compose via public/env.js (window.__ENV__).
+const LANDING_URL =
+  (window as unknown as { __ENV__?: { LANDING_URL?: string } }).__ENV__?.LANDING_URL
+  ?? 'http://localhost:3002'
+
 export function Sidebar() {
   const { pathname } = useLocation()
   const [status, setStatus] = useState<SystemStatus | null>(null)
@@ -95,6 +100,17 @@ export function Sidebar() {
             </Link>
           )
         })}
+
+        <a
+          href={LANDING_URL}
+          className="flex items-center gap-3 px-3 py-2.5 mt-1 rounded-lg text-sm font-medium transition-colors"
+          style={{ color: '#9CA3AF', borderTop: '1px solid #1E2A3A', borderRadius: 0, marginTop: '10px', paddingTop: '14px' }}
+          onMouseEnter={e => (e.currentTarget as HTMLElement).style.color = '#7fc4a6'}
+          onMouseLeave={e => (e.currentTarget as HTMLElement).style.color = '#9CA3AF'}
+        >
+          <ExternalIcon className="w-5 h-5 flex-shrink-0" />
+          Sitio del producto
+        </a>
       </nav>
 
       {/* System Status */}
@@ -174,6 +190,16 @@ function ListIcon(p: SVG) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} {...p}>
       <path strokeLinecap="round" strokeLinejoin="round"
         d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
+      />
+    </svg>
+  )
+}
+
+function ExternalIcon(p: SVG) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} {...p}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
       />
     </svg>
   )
