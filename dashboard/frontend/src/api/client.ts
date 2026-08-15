@@ -6,6 +6,9 @@ import type {
   InventoryItem,
   AuditEntry,
   SystemStatus,
+  WorkflowSummary,
+  WorkflowTriggerResponse,
+  WorkflowStatusResponse,
 } from '../types'
 
 const BASE = '/api'
@@ -62,4 +65,13 @@ export const api = {
 
   systemStatus: (): Promise<SystemStatus> =>
     req('/system-status'),
+
+  workflows: (): Promise<WorkflowSummary[]> =>
+    req('/workflows'),
+
+  triggerWorkflow: (name: string): Promise<WorkflowTriggerResponse> =>
+    req(`/workflows/${name}/trigger`, { method: 'POST' }),
+
+  workflowStatus: (name: string, since?: string): Promise<WorkflowStatusResponse> =>
+    req(`/workflows/${name}/status${qs({ since })}`),
 }

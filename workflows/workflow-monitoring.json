@@ -23,6 +23,22 @@
     },
     {
       "parameters": {
+        "httpMethod": "POST",
+        "path": "monitoring-trigger",
+        "options": {}
+      },
+      "id": "e47c9b3e-6a15-48f7-93e2-1d6c84a70bfa",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        416,
+        848
+      ],
+      "webhookId": "monitoring-trigger-v1"
+    },
+    {
+      "parameters": {
         "operation": "executeQuery",
         "query": "SET search_path TO vulnerability_management;\nSELECT\n  av.id                    AS av_id,\n  av.criticality_tier,\n  av.risk_score,\n  av.sla_deadline,\n  c.cve_id                 AS cve_id_str,\n  c.cvss_v3_base_score,\n  si.asset_name            AS asset_name,\n  si.criticality           AS asset_criticality,\n  va.id                    AS alert_id,\n  va.status                AS alert_status,\n  va.sent_at\nFROM vulnerability_management.applicable_vulnerabilities av\nJOIN vulnerability_management.cves c                  ON c.id  = av.cve_id\nJOIN vulnerability_management.software_inventory si   ON si.id = av.software_id\nJOIN vulnerability_management.vulnerability_alerts va ON va.applicable_vulnerability_id = av.id\nWHERE av.sla_deadline IS NOT NULL\n  AND CURRENT_TIMESTAMP > av.sla_deadline\n  AND va.status NOT IN ('remediated', 'false_positive')\nORDER BY av.risk_score DESC NULLS LAST, av.sla_deadline ASC",
         "options": {}
@@ -171,6 +187,17 @@
   "pinData": {},
   "connections": {
     "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Postgres Query SLA Overdue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger": {
       "main": [
         [
           {

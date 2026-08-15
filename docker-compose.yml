@@ -121,6 +121,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Internal n8n URL for manual workflow triggers — Docker service name, not localhost.
+      N8N_INTERNAL_URL: http://n8n:5678
     networks:
       - vuln-network
     ports:
@@ -128,6 +130,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      n8n:
+        condition: service_started
 
   vuln-dashboard:
     build:

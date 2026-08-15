@@ -29,6 +29,7 @@ const NAV = [
   { to: '/overview',   label: 'Overview',   Icon: GridIcon },
   { to: '/inventory',  label: 'Inventario', Icon: DbIcon },
   { to: '/audit-log',  label: 'Audit Log',  Icon: ListIcon },
+  { to: '/workflows',  label: 'Ejecutar Workflows', Icon: PlayIcon },
 ]
 
 // Runtime env injected by docker-compose via public/env.js (window.__ENV__).
@@ -190,6 +191,16 @@ function ListIcon(p: SVG) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} {...p}>
       <path strokeLinecap="round" strokeLinejoin="round"
         d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
+      />
+    </svg>
+  )
+}
+
+function PlayIcon(p: SVG) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} {...p}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 010 1.972l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z"
       />
     </svg>
   )

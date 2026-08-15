@@ -13,6 +13,7 @@ Sistema de notificación automatizada de parches de vulnerabilidades mediante in
 | `n8n`               | Motor de orquestación (5 workflows)                 | `5678`               |
 | `vuln-api`         | Backend del dashboard                               | `8000`               |
 | `vuln-dashboard`   | Frontend React (Nginx)                              | `3001`               |
+| `landing`          | Landing page estática (Nginx)                       | `3002`               |
 
 ### Requisitos previos
 
@@ -72,7 +73,13 @@ SMTP_PASSWORD=tu_app_password        # usar App Password de Gmail, no la contras
 SECURITY_TEAM_EMAIL=security@tuempresa.com
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 SLACK_WEBHOOK_ESCALATION=https://hooks.slack.com/services/...
+
+# Cross-navegación entre landing y dashboard (opcional; estos son los valores por defecto)
+DASHBOARD_URL=http://localhost:3001
+LANDING_URL=http://localhost:3002
 ```
+
+> `N8N_INTERNAL_URL` (usado por `vuln-api` para disparar workflows manualmente, ver más abajo) no requiere configuración: por defecto apunta a `http://n8n:5678`, el nombre del servicio en la red interna de Docker.
 
 > **Nota:** `POSTGRES_HOST=postgres` corresponde a la red interna de Docker — n8n y `vuln-api` se conectan por el nombre del servicio, no por `localhost`. Para conectarte desde tu máquina (pgAdmin, DBeaver, psql) usá `localhost:5433` (ver más abajo).
 
@@ -83,7 +90,7 @@ docker compose build
 docker compose up -d
 ```
 
-Esto construye las imágenes de `vuln-api` y `vuln-dashboard` (Dockerfiles propios en `./dashboard/backend` y `./dashboard/frontend`) y descarga las imágenes oficiales de `postgres`, `redis` y `n8n`.
+Esto construye las imágenes de `vuln-api`, `vuln-dashboard` y `landing` (Dockerfiles propios en `./dashboard/backend`, `./dashboard/frontend` y `./landing`) y descarga las imágenes oficiales de `postgres`, `redis` y `n8n`.
 
 Verificá el estado de todos los servicios:
 
@@ -93,6 +100,12 @@ docker compose ps
 
 El esquema SQL (`./db/schema.sql`) se ejecuta automáticamente en el primer arranque del contenedor de Postgres — no hace falta correrlo a mano.
 
+Si querés cargar datos de ejemplo (`./db/seed.sql`), corré manualmente después del primer arranque — no se monta automáticamente como el schema:
+
+```bash
+docker compose exec -T postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -f - < db/seed.sql
+```
+
 ### 4. Importar los workflows en n8n
 
 1. Accedé a `http://localhost:5678`
@@ -100,9 +113,12 @@ El esquema SQL (`./db/schema.sql`) se ejecuta automáticamente en el primer arra
 3. Importá los 5 workflows JSON desde la carpeta `workflows/` (Collection, Correlation, Prioritization, Alerts, Monitoring)
 4. Activá cada uno desde el toggle superior derecho
 
-### 5. Acceder al dashboard
+### 5. Acceder al dashboard y la landing
 
-Abrí `http://localhost:3001` para ver el panel de visualización (Overview, Inventario, Audit Log). El backend (`vuln-api`) corre en `http://localhost:8000`.
+- Landing page: `http://localhost:3002`
+- Dashboard: `http://localhost:3001` — Overview, **Inventario** (alta/edición/baja de assets, no solo lectura), Audit Log y **Workflows**. El backend (`vuln-api`) corre en `http://localhost:8000` (`/api/health` para chequear que esté vivo).
+
+La sección **Workflows** del dashboard permite disparar manualmente cada una de las 5 etapas del pipeline ("Ejecutar ahora") además del cron/encadenado normal, y confirma el resultado sondeando `audit_log`. Cada workflow tiene su propio nodo Webhook Trigger (`collection-trigger`, `correlation-trigger`, `prioritization-trigger`, `alerts-trigger`, `monitoring-trigger`) — recordá que el workflow debe estar **activo** en n8n (paso 4) para que el webhook responda.
 
 ### Conectarse a la base de datos desde el host
 
@@ -125,6 +141,8 @@ docker compose down -v       # ⚠️ también borra los volúmenes (postgres_da
 docker compose logs -f n8n
 docker compose logs -f postgres
 docker compose logs -f vuln-api
+docker compose logs -f vuln-dashboard
+docker compose logs -f landing
 docker compose restart n8n
 ```
 

@@ -15,6 +15,7 @@ dashboard/backend/__pycache__/
 # ─── Database Backups ────────────────────────────────────────────────────────
 backup_db.sql
 db/backup_pre_reset_*.sql
+*.dump
 
 # ─── Claude Code ─────────────────────────────────────────────────────────────
 .claude/settings.local.json

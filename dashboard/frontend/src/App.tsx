@@ -3,6 +3,7 @@ import { Sidebar } from './components/Sidebar'
 import { Overview } from './pages/Overview'
 import { Inventory } from './pages/Inventory'
 import { AuditLog } from './pages/AuditLog'
+import { Workflows } from './pages/Workflows'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
             <Route path="/overview" element={<Overview />} />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/audit-log" element={<AuditLog />} />
+            <Route path="/workflows" element={<Workflows />} />
           </Routes>
         </main>
       </div>

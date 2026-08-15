@@ -8,7 +8,8 @@ from typing import Optional
 import psycopg2
 import psycopg2.errors
 import psycopg2.extras
-from fastapi import FastAPI, HTTPException, Query
+import requests
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -382,3 +383,110 @@ def system_status():
         )
     finally:
         conn.close()
+
+
+# ── Workflows (manual trigger) ─────────────────────────────────────────────────
+
+N8N_INTERNAL_URL = os.getenv("N8N_INTERNAL_URL", "http://n8n:5678")
+
+# Docker service name for n8n on the internal network — never localhost, so this
+# works the same whether the stack runs on this host or another.
+WORKFLOW_WEBHOOK_PATHS = {
+    "workflow-collection": "collection-trigger",
+    "workflow-correlation": "correlation-trigger",
+    "workflow-prioritization": "prioritization-trigger",
+    "workflow-alerts": "alerts-trigger",
+    "workflow-monitoring": "monitoring-trigger",
+}
+
+WORKFLOW_DESCRIPTIONS = {
+    "workflow-collection": "Descarga CVEs nuevas desde la NVD y las carga en la base.",
+    "workflow-correlation": "Correlaciona CVEs contra el inventario de activos por CPE (4 niveles de confianza).",
+    "workflow-prioritization": "Calcula el risk score y asigna criticality tier a cada correlación.",
+    "workflow-alerts": "Envía notificaciones (email + Slack) de las vulnerabilidades priorizadas.",
+    "workflow-monitoring": "Revisa SLAs vencidos y escala las alertas fuera de plazo.",
+}
+
+WORKFLOW_ORDER = list(WORKFLOW_DESCRIPTIONS.keys())
+
+
+@app.get("/api/workflows")
+def workflows_list():
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT ON (workflow_name) "
+            "workflow_name, status, records_processed, error_message, "
+            "execution_time_ms, executed_at "
+            "FROM audit_log ORDER BY workflow_name, executed_at DESC"
+        )
+        latest = {r["workflow_name"]: dict(r) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+    return _j(
+        [
+            {
+                "workflow_name": name,
+                "description": WORKFLOW_DESCRIPTIONS[name],
+                "last_run": latest.get(name),
+            }
+            for name in WORKFLOW_ORDER
+        ]
+    )
+
+
+def _fire_webhook(path: str) -> None:
+    try:
+        # The workflow itself writes its own audit_log row; the trigger call
+        # doesn't need to wait for that or report back through this response.
+        requests.post(f"{N8N_INTERNAL_URL}/webhook/{path}", timeout=120)
+    except requests.RequestException:
+        pass
+
+
+@app.post("/api/workflows/{name}/trigger")
+def workflow_trigger(name: str, background_tasks: BackgroundTasks):
+    path = WORKFLOW_WEBHOOK_PATHS.get(name)
+    if not path:
+        raise HTTPException(404, f"Workflow desconocido: {name}")
+    background_tasks.add_task(_fire_webhook, path)
+    return {
+        "workflow_name": name,
+        "status": "triggered",
+        "triggered_at": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/workflows/{name}/status")
+def workflow_status(name: str, since: Optional[str] = Query(None)):
+    if name not in WORKFLOW_WEBHOOK_PATHS:
+        raise HTTPException(404, f"Workflow desconocido: {name}")
+
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT workflow_name, status, records_processed, error_message, "
+            "execution_time_ms, executed_at FROM audit_log "
+            "WHERE workflow_name = %s ORDER BY executed_at DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {"workflow_name": name, "last_run": None, "is_new": False}
+
+    row = dict(row)
+    is_new = True
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            is_new = bool(row["executed_at"]) and row["executed_at"] > since_dt
+        except ValueError:
+            pass
+
+    return _j({"workflow_name": name, "last_run": row, "is_new": is_new})

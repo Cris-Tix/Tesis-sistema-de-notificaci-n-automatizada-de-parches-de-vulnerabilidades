@@ -90,3 +90,30 @@ export interface SystemStatus {
   active_vulnerabilities: number
   db_status: string
 }
+
+export interface WorkflowRun {
+  workflow_name: string
+  status: string
+  records_processed: number | null
+  error_message: string | null
+  execution_time_ms: number | null
+  executed_at: string
+}
+
+export interface WorkflowSummary {
+  workflow_name: string
+  description: string
+  last_run: WorkflowRun | null
+}
+
+export interface WorkflowTriggerResponse {
+  workflow_name: string
+  status: string
+  triggered_at: string
+}
+
+export interface WorkflowStatusResponse {
+  workflow_name: string
+  last_run: WorkflowRun | null
+  is_new: boolean
+}
